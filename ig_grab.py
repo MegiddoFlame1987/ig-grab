@@ -5,7 +5,7 @@ Setup (raz):
     pip install yt-dlp faster-whisper anthropic
     brew install ffmpeg   # lub apt install ffmpeg
 Uzycie:
-    python ig_grab.py --browser chrome URL [URL ...]
+    python ig_grab.py --browser chrome URL [URL ...]   # lub --cookies cookies.txt
     python ig_grab.py --browser chrome --urls-file linki.txt --out ig_out
 Przepis (opcjonalnie): ustaw ANTHROPIC_API_KEY. Bez klucza dostajesz tylko transkrypcje.
 """
@@ -18,9 +18,10 @@ def shortcode(url: str) -> str:
     return m.group(1) if m else re.sub(r"\W+", "_", url)[-24:]
 
 
-def download(url: str, dest: Path, browser: str) -> None:
+def download(url: str, dest: Path, browser: str, cookies: str = "") -> None:
+    auth = ["--cookies", cookies] if cookies else ["--cookies-from-browser", browser]
     subprocess.run(
-        ["yt-dlp", "--cookies-from-browser", browser, "--write-info-json",
+        ["yt-dlp", *auth, "--write-info-json",
          "--write-thumbnail", "--sleep-requests", "2",
          "-o", str(dest / "media.%(ext)s"), url],
         check=True,
@@ -57,6 +58,7 @@ def main() -> int:
     ap.add_argument("urls", nargs="*")
     ap.add_argument("--urls-file")
     ap.add_argument("--browser", default="chrome")
+    ap.add_argument("--cookies", help="plik cookies.txt (Netscape); zamiast --browser")
     ap.add_argument("--out", default="ig_out")
     a = ap.parse_args()
     urls = list(a.urls)
@@ -71,7 +73,7 @@ def main() -> int:
         dest.mkdir(parents=True, exist_ok=True)
         print(f"-> {url}")
         try:
-            download(url, dest, a.browser)
+            download(url, dest, a.browser, a.cookies)
             info = json.loads(next(dest.glob("media.info.json")).read_text(encoding="utf-8"))
             caption = info.get("description") or ""
             (dest / "caption.txt").write_text(caption, encoding="utf-8")
