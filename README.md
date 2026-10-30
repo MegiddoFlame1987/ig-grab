@@ -5,7 +5,7 @@ Instagram URL -> folder z wideo, miniaturą, opisem, transkrypcją i przepisem. 
 ## Setup
 
 ```bash
-pip install yt-dlp faster-whisper anthropic
+pip install yt-dlp faster-whisper anthropic "av<17"   # av 17+ psuje faster-whisper
 ```
 
 Potrzebny też `ffmpeg` (`brew install ffmpeg` lub `apt install ffmpeg`).

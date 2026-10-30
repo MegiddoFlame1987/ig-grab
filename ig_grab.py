@@ -2,7 +2,7 @@
 """ig_grab: Instagram URL -> folder z wideo, zdjeciami, opisem, transkrypcja i przepisem.
 
 Setup (raz):
-    pip install yt-dlp faster-whisper anthropic
+    pip install yt-dlp faster-whisper anthropic "av<17"   # av 17+ psuje faster-whisper
     brew install ffmpeg   # lub apt install ffmpeg
 Uzycie:
     python ig_grab.py --browser chrome URL [URL ...]   # lub --cookies cookies.txt
