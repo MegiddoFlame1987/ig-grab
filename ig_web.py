@@ -27,8 +27,13 @@ def save(st: dict) -> None:
     STATE_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+LOCAL_ERRORS = ("No module named", "brak ffmpeg", "WinError 2")  # nie dotarly do Instagrama
+
+
 def today_count(st: dict) -> int:
-    return sum(1 for e in st["log"] if e["day"] == str(date.today()))
+    """Do limitu licza sie tylko proby, ktore realnie poszly do Instagrama."""
+    return sum(1 for e in st["log"] if e["day"] == str(date.today())
+               and not any(m in e["status"] for m in LOCAL_ERRORS))
 
 
 def worker() -> None:
