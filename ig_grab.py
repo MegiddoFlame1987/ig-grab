@@ -83,6 +83,26 @@ def slide_text(dest: Path) -> str:
     return text
 
 
+def frame_text(video: Path, dest: Path, transcript: str) -> str:
+    """Tekst z ekranu wideo - tylko gdy brak mowy (krotka transkrypcja), zeby nie palic kosztow."""
+    if not video or len(transcript.split()) >= 30 or not os.environ.get("ANTHROPIC_API_KEY"):
+        return ""
+    fr = dest / "frames"
+    fr.mkdir(exist_ok=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-vf", "fps=1,scale=720:-2",
+                    "-frames:v", "20", str(fr / "f_%02d.jpg")], check=True)
+    frames = sorted(fr.glob("f_*.jpg"))
+    content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                "data": base64.b64encode(f.read_bytes()).decode()}} for f in frames]
+    content.append({"type": "text", "text":
+        "To klatki (1 na sekunde) z jednego krotkiego wideo. Przepisz doslownie caly tekst "
+        "widoczny na ekranie, w kolejnosci klatek, bez powtorzen. Nic nie dodawaj. "
+        "Gdy nie ma tekstu, napisz 'brak tekstu'."})
+    text = _claude(content, 3000)
+    (dest / "frames.txt").write_text(text, encoding="utf-8")
+    return "" if text.lower().startswith("brak tekstu") else text
+
+
 def recipe(source: str, dest: Path) -> str:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("  brak ANTHROPIC_API_KEY - pomijam recipe.md, etykiete i tekst ze slajdow")
@@ -110,7 +130,7 @@ def write_note(notes: Path, code: str, url: str, info: dict, tag: str,
     parts = [f"---\nurl: {url}\nautor: {info.get('uploader') or info.get('channel') or ''}\n"
              f"etykieta: {tag}\npobrano: {date.today()}\n---\n", f"# {code}\n"]
     for title, body in (("Opis", caption), ("Transkrypcja", transcript),
-                        ("Tekst ze slajdow", slides)):
+                        ("Tekst ze slajdow / z ekranu", slides)):
         if body.strip():
             parts.append(f"## {title}\n\n{body.strip()}\n")
     if recipe_md and not recipe_md.lower().startswith("to nie przepis"):
@@ -147,8 +167,8 @@ def main() -> int:
                 print(f"  zdjec: {photos}")
             video = next(dest.glob("media.mp4"), None)
             text = transcribe(video, dest) if video else ""
-            slides = slide_text(dest)
-            source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW:\n{slides}"
+            slides = slide_text(dest) or frame_text(video, dest, text)
+            source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW / Z EKRANU:\n{slides}"
             rec = recipe(source, dest)
             write_note(Path(a.notes), dest.name, url, info, label(source),
                        caption, text, slides, rec)
