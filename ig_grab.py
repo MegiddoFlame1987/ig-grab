@@ -118,12 +118,23 @@ def recipe(source: str, dest: Path) -> str:
     return text
 
 
-CATEGORIES = ("ai", "trading", "przepis", "inne")  # zmien tutaj, jesli chcesz inne kategorie
+CATEGORIES = ("ai", "trading", "przepis", "biznes", "inne")  # zmien tutaj, jesli chcesz inne kategorie
 RATINGS = ("konkretna wiedza", "czesciowo", "reklama poradnika", "bez dowodu", "ciekawostka")
 RESERVED = {"INDEX.md", "CLAUDE.md"}  # pliki pomocnicze w notes/, nie sa notatkami
 
 
-def analyze(source: str) -> dict:
+def known_tags(notes: Path, top: int = 40) -> list:
+    """Najczesciej uzywane tagi z istniejacych notatek - zeby nowe notatki sie z nimi lacza."""
+    cnt = {}
+    for f in notes.glob("*.md") if notes.exists() else []:
+        m = re.search(r"^tagi: (.*)$", f.read_text(encoding="utf-8")[:2000], re.M)
+        for t in (m.group(1).split(",") if m else []):
+            if t.strip():
+                cnt[t.strip()] = cnt.get(t.strip(), 0) + 1
+    return [t for t, _ in sorted(cnt.items(), key=lambda x: -x[1])[:top]]
+
+
+def analyze(source: str, known: list = ()) -> dict:
     """Jedno wywolanie: tytul, streszczenie, kategoria (lista zamknieta), ocena."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return {}
@@ -135,13 +146,18 @@ def analyze(source: str) -> dict:
         f'"ocena": dokladnie jedna z {list(RATINGS)}. Wybierz "reklama poradnika", gdy prawdziwa '
         'tresc jest dostepna dopiero po komentarzu lub w DM, a sam post jej nie zawiera. '
         'Wybierz "bez dowodu", gdy post obiecuje wyniki, zyski lub skutecznosc (np. w tradingu), '
-        'a niczego nie uzasadnia.\n\n'
+        'a niczego nie uzasadnia.\n'
+        '"tagi": lista 3-5 krotkich tagow tematycznych po polsku (male litery, 1-2 slowa, np. "claude code", '
+        '"prompty", "marketing"). ' + (f"Uzywaj istniejacych tagow, gdy pasuja: {list(known)}. " if known else "")
+        + 'Nowy tag tylko gdy zaden istniejacy nie pasuje.\n\n'
         "TRESC:\n" + source[:12000], 1500)
     m = re.search(r"\{.*\}", raw, re.S)
     try:
         d = json.loads(m.group(0)) if m else {}
     except ValueError:
         return {}
+    tags = d.get("tagi") if isinstance(d.get("tagi"), list) else []
+    d["tagi"] = list(dict.fromkeys(t.strip().lower() for t in tags if isinstance(t, str) and t.strip()))[:5]
     d["kategoria"] = d.get("kategoria") if d.get("kategoria") in CATEGORIES else "inne"
     d["ocena"] = d.get("ocena") if d.get("ocena") in RATINGS else "czesciowo"
     return d
@@ -163,6 +179,7 @@ def write_note(notes: Path, code: str, url: str, info: dict, an: dict,
     d = info.get("upload_date") or ""
     fm = {"url": url, "autor": info.get("uploader") or info.get("channel") or "",
           "kategoria": an.get("kategoria", ""), "ocena": an.get("ocena", ""),
+          "tagi": ", ".join(an.get("tagi", [])),
           "data_posta": f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else "",
           "pobrano": str(date.today())}
     sections = [f"## {t}\n\n{b.strip()}\n" for t, b in
@@ -186,12 +203,12 @@ def resort(notes: Path) -> None:
         body = m.group(2)
         i = body.find("\n## ")
         rest, _, moje = (body[i:] if i >= 0 else "").partition("\n## Moje")
-        an = analyze(rest)
+        an = analyze(rest, known_tags(notes))
         if not an:
             print(f"  {f.name}: brak ANTHROPIC_API_KEY lub zla odpowiedz - pomijam")
             continue
         fm.pop("etykieta", None)
-        fm["kategoria"], fm["ocena"] = an["kategoria"], an["ocena"]
+        fm["kategoria"], fm["ocena"], fm["tagi"] = an["kategoria"], an["ocena"], ", ".join(an["tagi"])
         sections = [x for x in re.split(r"(?=^## )", rest.strip() + "\n", flags=re.M) if x.strip()]
         f.write_text(note_text(fm, an, f.stem, sections, moje), encoding="utf-8")
         print(f"  {f.name}: {an['kategoria']} / {an['ocena']}")
@@ -248,7 +265,7 @@ def process(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: 
     slides = slide_text(dest) or frame_text(video, dest, text)
     source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW / Z EKRANU:\n{slides}"
     rec = recipe(source, dest)
-    write_note(notes, dest.name, url, info, analyze(source), caption, text, slides, rec)
+    write_note(notes, dest.name, url, info, analyze(source, known_tags(notes)), caption, text, slides, rec)
     refresh_index(notes)
 
 
