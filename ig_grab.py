@@ -9,7 +9,8 @@ Uzycie:
     python ig_grab.py --browser chrome --urls-file linki.txt --out ig_out
 Przepis (opcjonalnie): ustaw ANTHROPIC_API_KEY. Bez klucza dostajesz tylko transkrypcje.
 """
-import argparse, json, os, re, subprocess, sys, urllib.request
+import argparse, base64, json, os, re, subprocess, sys, urllib.request
+from datetime import date
 from pathlib import Path
 
 
@@ -58,20 +59,63 @@ def transcribe(video: Path, dest: Path) -> str:
     return text
 
 
-def recipe(caption: str, transcript: str, dest: Path) -> None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("  brak ANTHROPIC_API_KEY - pomijam recipe.md")
-        return
+def _claude(content, max_tokens: int) -> str:
     import anthropic
     msg = anthropic.Anthropic().messages.create(
-        model="claude-sonnet-5-5", max_tokens=1500,
-        messages=[{"role": "user", "content":
-            "Z opisu i transkrypcji wyciagnij przepis jako Markdown: tytul, skladniki "
-            "(z ilosciami), kroki. Nie dodawaj niczego, czego nie ma w zrodle; "
-            "brak danych oznacz jako 'brak'. Jesli to nie przepis, napisz 'to nie przepis'.\n\n"
-            f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{transcript}"}],
-    )
-    (dest / "recipe.md").write_text(msg.content[0].text, encoding="utf-8")
+        model="claude-sonnet-5-5", max_tokens=max_tokens,
+        messages=[{"role": "user", "content": content}])
+    return "".join(b.text for b in msg.content if b.type == "text").strip()
+
+
+def slide_text(dest: Path) -> str:
+    """Tekst ze zdjec/slajdow (karuzele) - czyta Claude. Bez klucza: pusto."""
+    photos = sorted(dest.glob("photo_*.jpg"))[:20]
+    if not photos or not os.environ.get("ANTHROPIC_API_KEY"):
+        return ""
+    content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                "data": base64.b64encode(p.read_bytes()).decode()}} for p in photos]
+    content.append({"type": "text", "text":
+        "To kolejne slajdy jednego posta. Przepisz doslownie caly tekst widoczny na kazdym "
+        "slajdzie, jako '### Slajd N' + tekst. Nie dodawaj niczego od siebie. "
+        "Slajd bez tekstu opisz jednym krotkim zdaniem w nawiasie."})
+    text = _claude(content, 4000)
+    (dest / "slides.txt").write_text(text, encoding="utf-8")
+    return text
+
+
+def recipe(source: str, dest: Path) -> str:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("  brak ANTHROPIC_API_KEY - pomijam recipe.md, etykiete i tekst ze slajdow")
+        return ""
+    text = _claude(
+        "Z ponizszej tresci wyciagnij przepis jako Markdown: tytul, skladniki "
+        "(z ilosciami), kroki. Nie dodawaj niczego, czego nie ma w zrodle; "
+        "brak danych oznacz jako 'brak'. Jesli to nie przepis, napisz 'to nie przepis'.\n\n" + source, 1500)
+    (dest / "recipe.md").write_text(text, encoding="utf-8")
+    return text
+
+
+def label(source: str) -> str:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return ""
+    return _claude(
+        "Nadaj temu postowi jedna etykiete tematyczna: 1-3 slowa po polsku, malymi literami "
+        "(np. 'przepis', 'trening', 'narzedzia ai'). Odpowiedz samą etykieta.\n\n" + source[:6000], 300
+    ).strip(" .\n\"'").lower()
+
+
+def write_note(notes: Path, code: str, url: str, info: dict, tag: str,
+               caption: str, transcript: str, slides: str, recipe_md: str) -> None:
+    notes.mkdir(parents=True, exist_ok=True)
+    parts = [f"---\nurl: {url}\nautor: {info.get('uploader') or info.get('channel') or ''}\n"
+             f"etykieta: {tag}\npobrano: {date.today()}\n---\n", f"# {code}\n"]
+    for title, body in (("Opis", caption), ("Transkrypcja", transcript),
+                        ("Tekst ze slajdow", slides)):
+        if body.strip():
+            parts.append(f"## {title}\n\n{body.strip()}\n")
+    if recipe_md and not recipe_md.lower().startswith("to nie przepis"):
+        parts.append(f"## Przepis\n\n{recipe_md}\n")
+    (notes / f"{code}.md").write_text("\n".join(parts), encoding="utf-8")
 
 
 def main() -> int:
@@ -81,6 +125,7 @@ def main() -> int:
     ap.add_argument("--browser", default="chrome")
     ap.add_argument("--cookies", help="plik cookies.txt (Netscape); zamiast --browser")
     ap.add_argument("--out", default="ig_out")
+    ap.add_argument("--notes", default="notes", help="folder na notatki .md (po jednej na post)")
     a = ap.parse_args()
     urls = list(a.urls)
     if a.urls_file:
@@ -102,7 +147,11 @@ def main() -> int:
                 print(f"  zdjec: {photos}")
             video = next(dest.glob("media.mp4"), None)
             text = transcribe(video, dest) if video else ""
-            recipe(caption, text, dest)
+            slides = slide_text(dest)
+            source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW:\n{slides}"
+            rec = recipe(source, dest)
+            write_note(Path(a.notes), dest.name, url, info, label(source),
+                       caption, text, slides, rec)
         except Exception as e:  # jeden zly link nie zatrzymuje reszty
             print(f"  BLAD: {e}", file=sys.stderr)
             failed.append(url)
