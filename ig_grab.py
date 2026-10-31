@@ -9,7 +9,7 @@ Uzycie:
     python ig_grab.py --browser chrome --urls-file linki.txt --out ig_out
 Przepis (opcjonalnie): ustaw ANTHROPIC_API_KEY. Bez klucza dostajesz tylko transkrypcje.
 """
-import argparse, base64, json, os, re, subprocess, sys, urllib.request
+import argparse, base64, json, os, re, shutil, subprocess, sys, urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -21,7 +21,10 @@ def shortcode(url: str) -> str:
 
 def download(url: str, dest: Path, browser: str, cookies: str = "") -> dict:
     auth = ["--cookies", cookies] if cookies else ["--cookies-from-browser", browser]
-    base = ["yt-dlp", *auth, "--ignore-no-formats-error", "--sleep-requests", "2"]
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("brak ffmpeg w PATH (Windows: winget install Gyan.FFmpeg, potem nowe okno PowerShell)")
+    # python -m yt_dlp: dziala nawet gdy skrypt yt-dlp nie jest w PATH (typowe na Windowsie)
+    base = [sys.executable, "-m", "yt_dlp", *auth, "--ignore-no-formats-error", "--sleep-requests", "2"]
     # pelne info (karuzela ma wpisy-slajdy; --write-info-json zapisuje tylko playliste bez nich)
     r = subprocess.run([*base, "-J", url], capture_output=True, text=True)
     if not r.stdout.strip():
