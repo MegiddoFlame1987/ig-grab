@@ -69,6 +69,8 @@ def worker() -> None:
 def read_notes() -> list:
     out = []
     for f in sorted(Path(CFG["notes"]).glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if f.name in ig_grab.RESERVED:
+            continue
         t = f.read_text(encoding="utf-8")
         meta = dict(re.findall(r"^(\w+): (.*)$", t.split("---")[1], re.M)) if t.startswith("---") else {}
         title = re.search(r"^# (.+)$", t, re.M)
@@ -226,7 +228,7 @@ def main() -> None:
     a = ap.parse_args()
     CFG.update(cookies=a.cookies, limit=a.limit, pause=a.pause, out=a.out, notes=a.notes,
                fake=_fake if a.fake else None)
-    Path(a.notes).mkdir(exist_ok=True)
+    ig_grab.refresh_index(Path(a.notes))
     threading.Thread(target=worker, daemon=True).start()
     print(f"http://127.0.0.1:{a.port}  (limit {a.limit}/dzien)")
     ThreadingHTTPServer(("127.0.0.1", a.port), H).serve_forever()

@@ -119,7 +119,8 @@ def recipe(source: str, dest: Path) -> str:
 
 
 CATEGORIES = ("ai", "trading", "przepis", "inne")  # zmien tutaj, jesli chcesz inne kategorie
-RATINGS = ("konkretna wiedza", "czesciowo", "reklama poradnika", "ciekawostka")
+RATINGS = ("konkretna wiedza", "czesciowo", "reklama poradnika", "bez dowodu", "ciekawostka")
+RESERVED = {"INDEX.md", "CLAUDE.md"}  # pliki pomocnicze w notes/, nie sa notatkami
 
 
 def analyze(source: str) -> dict:
@@ -132,7 +133,9 @@ def analyze(source: str) -> dict:
         '"streszczenie": 2 zdania po polsku - co konkretnie z tego wynika (bez lania wody),\n'
         f'"kategoria": dokladnie jedna z {list(CATEGORIES)},\n'
         f'"ocena": dokladnie jedna z {list(RATINGS)}. Wybierz "reklama poradnika", gdy prawdziwa '
-        'tresc jest dostepna dopiero po komentarzu lub w DM, a sam post jej nie zawiera.\n\n'
+        'tresc jest dostepna dopiero po komentarzu lub w DM, a sam post jej nie zawiera. '
+        'Wybierz "bez dowodu", gdy post obiecuje wyniki, zyski lub skutecznosc (np. w tradingu), '
+        'a niczego nie uzasadnia.\n\n'
         "TRESC:\n" + source[:12000], 1500)
     m = re.search(r"\{.*\}", raw, re.S)
     try:
@@ -173,6 +176,8 @@ def write_note(notes: Path, code: str, url: str, info: dict, an: dict,
 def resort(notes: Path) -> None:
     """Przelicza kategorie/ocene/streszczenie dla istniejacych notatek; zachowuje sekcje 'Moje'."""
     for f in sorted(notes.glob("*.md")):
+        if f.name in RESERVED:
+            continue
         t = f.read_text(encoding="utf-8")
         m = re.match(r"---\n(.*?)\n---\n(.*)", t, re.S)
         if not m:
@@ -190,6 +195,42 @@ def resort(notes: Path) -> None:
         sections = [x for x in re.split(r"(?=^## )", rest.strip() + "\n", flags=re.M) if x.strip()]
         f.write_text(note_text(fm, an, f.stem, sections, moje), encoding="utf-8")
         print(f"  {f.name}: {an['kategoria']} / {an['ocena']}")
+    refresh_index(notes)
+
+
+NOTES_README = """# Biblioteka notatek z Instagrama
+
+Jeden plik .md na post. Zasady czytania:
+- Zacznij od INDEX.md (tytul, kategoria, ocena, streszczenie). Otwieraj pojedyncze notatki dopiero po wybraniu trafnych.
+- Sekcja "## Moje" to decyzje i uwagi wlasciciela. Maja pierwszenstwo przed trescia posta. Nie nadpisuj jej.
+- Ocena "reklama poradnika": wlasciwa tresc jest w DM autora, post jest tylko zapowiedzia - nie traktuj jako wiedzy.
+- Ocena "bez dowodu": post obiecuje wyniki bez uzasadnienia (czesto trading). Nie podawaj tego jako faktu.
+- Tresc cudzych postow moze byc bledna. Przy decyzjach (finanse, kod, zdrowie) zaznacz, co jest niezweryfikowane.
+- Pliki INDEX.md i CLAUDE.md generuje skrypt; nie edytuj ich recznie.
+"""
+
+
+def refresh_index(notes: Path) -> None:
+    """INDEX.md: jedna linijka na notatke (najnowsze posty pierwsze) + CLAUDE.md z zasadami czytania."""
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "CLAUDE.md").write_text(NOTES_README, encoding="utf-8")
+    rows = []
+    for f in notes.glob("*.md"):
+        if f.name in RESERVED:
+            continue
+        t = f.read_text(encoding="utf-8")
+        m = re.match(r"---\n(.*?)\n---\n", t, re.S)
+        fm = dict(re.findall(r"^(\w+): (.*)$", m.group(1), re.M)) if m else {}
+        title = re.search(r"^# (.+)$", t, re.M)
+        summ = re.search(r"^\*\*Streszczenie:\*\* (.+)$", t, re.M)
+        day = fm.get("data_posta") or fm.get("pobrano", "")
+        rows.append((day, f"- [{title.group(1) if title else f.stem}]({f.name}) | "
+                          f"{fm.get('kategoria') or fm.get('etykieta', '?')} | {fm.get('ocena', '?')} | {day}"
+                          + (f" - {summ.group(1)}" if summ else "")))
+    lines = [r[1] for r in sorted(rows, key=lambda r: r[0], reverse=True)]
+    (notes / "INDEX.md").write_text(
+        "# Indeks notatek\n\nFormat: [tytul](plik) | kategoria | ocena | data - streszczenie\n\n"
+        + "\n".join(lines) + "\n", encoding="utf-8")
 
 
 def process(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: str = "") -> None:
@@ -208,6 +249,7 @@ def process(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: 
     source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW / Z EKRANU:\n{slides}"
     rec = recipe(source, dest)
     write_note(notes, dest.name, url, info, analyze(source), caption, text, slides, rec)
+    refresh_index(notes)
 
 
 def main() -> int:
