@@ -71,8 +71,11 @@ def read_notes() -> list:
     for f in sorted(Path(CFG["notes"]).glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
         t = f.read_text(encoding="utf-8")
         meta = dict(re.findall(r"^(\w+): (.*)$", t.split("---")[1], re.M)) if t.startswith("---") else {}
-        out.append({"id": f.stem, "tag": meta.get("etykieta", ""), "autor": meta.get("autor", ""),
-                    "url": meta.get("url", ""), "text": t})
+        title = re.search(r"^# (.+)$", t, re.M)
+        out.append({"id": f.stem, "tag": meta.get("kategoria") or meta.get("etykieta", ""),
+                    "ocena": meta.get("ocena", ""), "data": meta.get("data_posta", ""),
+                    "tytul": title.group(1) if title else f.stem,
+                    "autor": meta.get("autor", ""), "url": meta.get("url", ""), "text": t})
     return out
 
 
@@ -131,15 +134,18 @@ function md(t){let h="",ul=false,para=[];
   else if(!l.trim()){fl();if(ul){h+="</ul>";ul=false}}
   else{if(ul){h+="</ul>";ul=false}para.push(l)}}
  fl();if(ul)h+="</ul>";return h}
-function body(n){return n.text.replace(/^---[\s\S]*?---\s*/,"")}
+function body(n){return n.text.replace(/^---[\s\S]*?---\s*/,"").split(/\n## Moje/)[0]}
+function moje(n){const p=n.text.split(/\n## Moje/);return p.length>1?p[1].trim():""}
+async function saveMy(id){const t=document.getElementById("my");
+ await fetch("/api/my",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,text:t.value})});
+ document.getElementById("saved").textContent="zapisano";await load();sel=id}
 function render(){
  const q=document.getElementById("q").value.toLowerCase();
  const tags=[...new Set(S.notes.map(n=>n.tag).filter(Boolean))].sort();
  document.getElementById("chips").innerHTML=tags.map(t=>`<span class="chip ${t==tag?"on":""}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join("");
  const shown=S.notes.filter(n=>(!tag||n.tag==tag)&&n.text.toLowerCase().includes(q));
  document.getElementById("list").innerHTML=shown.map(n=>{
-  const title=(body(n).match(/^## Opis\s+([^\n]+)/m)||[])[1]||n.id;
-  return `<div class="item ${n.id==sel?"on":""}" onclick="pick('${esc(n.id)}')"><b>${esc(title.slice(0,80))}</b><small>${esc(n.tag)} · ${esc(n.autor)}</small></div>`}).join("")||'<p class=empty style="margin:20px">Brak notatek.</p>';
+  return `<div class="item ${n.id==sel?"on":""}" onclick="pick('${esc(n.id)}')"><b>${esc(n.tytul.slice(0,80))}</b><small>${esc([n.tag,n.ocena,n.autor].filter(Boolean).join(" · "))}</small></div>`}).join("")||'<p class=empty style="margin:20px">Brak notatek.</p>';
  document.getElementById("quota").textContent=`dziś ${S.used}/${S.limit} · kolejka ${S.queue.length}`;
  document.getElementById("queue").innerHTML="<ul>"+S.queue.map(u=>"<li>"+esc(u)+"</li>").join("")+"</ul><ul>"+S.log.slice(-6).reverse().map(x=>"<li>"+esc(x.ts+" "+x.status)+"</li>").join("")+"</ul>";
 }
@@ -147,8 +153,9 @@ function setTag(t){tag=tag==t?"":t;render()}
 function pick(id){sel=id;const n=S.notes.find(x=>x.id==id);if(!n)return;
  const rel=S.notes.filter(x=>x.tag==n.tag&&x.id!=id).slice(0,8);
  document.getElementById("note").innerHTML=
-  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><a href="${esc(n.url)}" target=_blank>oryginał ↗</a></div>`+md(body(n))+
-  (rel.length?`<div class=rel><b>Podobne (${esc(n.tag)})</b>`+rel.map(r=>`<a href=# onclick="pick('${esc(r.id)}');return false">${esc(r.id)}</a>`).join("")+"</div>":"");
+  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><span>${esc(n.ocena)}</span><span>${esc(n.data)}</span><a href="${esc(n.url)}" target=_blank>oryginał ↗</a></div>`+md(body(n))+
+  `<h2>Moje</h2><textarea id=my style="height:110px" placeholder="twoja notatka: co z tym zrobić, gdzie wykorzystać">${esc(moje(n))}</textarea><button onclick="saveMy('${esc(n.id)}')">Zapisz</button> <small id=saved style="color:var(--mut)"></small>`+
+  (rel.length?`<div class=rel><b>Podobne (${esc(n.tag)})</b>`+rel.map(r=>`<a href=# onclick="pick('${esc(r.id)}');return false">${esc(r.tytul)}</a>`).join("")+"</div>":"");
  render();document.getElementById("main").scrollTop=0}
 async function load(){try{S=await (await fetch("/api/state")).json();render()}catch(e){}}
 async function add(){const t=document.getElementById("urls");
@@ -174,7 +181,7 @@ class H(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         if u.path == "/api/state":
             st = load()
-            data = {"notes": [{k: n[k] for k in ("id", "tag", "autor", "url", "text")} for n in read_notes()],
+            data = {"notes": [{k: n[k] for k in ("id", "tag", "ocena", "data", "tytul", "autor", "url", "text")} for n in read_notes()],
                     "queue": st["queue"], "log": st["log"], "used": today_count(st), "limit": CFG["limit"]}
             b = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -186,6 +193,13 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
+        if self.path == "/api/my":
+            d = json.loads(self.rfile.read(n).decode("utf-8"))
+            f = Path(CFG["notes"]) / (re.sub(r"[^\w-]", "", d.get("id", "")) + ".md")
+            if f.exists():
+                head = f.read_text(encoding="utf-8").split("\n## Moje")[0].rstrip()
+                f.write_text(f"{head}\n\n## Moje\n\n{str(d.get('text', '')).strip()}\n", encoding="utf-8")
+            return self.send("ok")
         urls = parse_qs(self.rfile.read(n).decode("utf-8")).get("urls", [""])[0].split()
         with LOCK:
             st = load()

@@ -118,27 +118,78 @@ def recipe(source: str, dest: Path) -> str:
     return text
 
 
-def label(source: str) -> str:
+CATEGORIES = ("ai", "trading", "przepis", "inne")  # zmien tutaj, jesli chcesz inne kategorie
+RATINGS = ("konkretna wiedza", "czesciowo", "reklama poradnika", "ciekawostka")
+
+
+def analyze(source: str) -> dict:
+    """Jedno wywolanie: tytul, streszczenie, kategoria (lista zamknieta), ocena."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        return ""
-    return _claude(
-        "Nadaj temu postowi jedna etykiete tematyczna: 1-3 slowa po polsku, malymi literami "
-        "(np. 'przepis', 'trening', 'narzedzia ai'). Odpowiedz samą etykieta.\n\n" + source[:6000], 300
-    ).strip(" .\n\"'").lower()
+        return {}
+    raw = _claude(
+        "Przeczytaj tresc posta z Instagrama i zwroc WYLACZNIE obiekt JSON z polami:\n"
+        '"tytul": konkretny tytul po polsku, max 70 znakow,\n'
+        '"streszczenie": 2 zdania po polsku - co konkretnie z tego wynika (bez lania wody),\n'
+        f'"kategoria": dokladnie jedna z {list(CATEGORIES)},\n'
+        f'"ocena": dokladnie jedna z {list(RATINGS)}. Wybierz "reklama poradnika", gdy prawdziwa '
+        'tresc jest dostepna dopiero po komentarzu lub w DM, a sam post jej nie zawiera.\n\n'
+        "TRESC:\n" + source[:12000], 1500)
+    m = re.search(r"\{.*\}", raw, re.S)
+    try:
+        d = json.loads(m.group(0)) if m else {}
+    except ValueError:
+        return {}
+    d["kategoria"] = d.get("kategoria") if d.get("kategoria") in CATEGORIES else "inne"
+    d["ocena"] = d.get("ocena") if d.get("ocena") in RATINGS else "czesciowo"
+    return d
 
 
-def write_note(notes: Path, code: str, url: str, info: dict, tag: str,
+def note_text(fm: dict, an: dict, code: str, sections: list, moje: str = "") -> str:
+    head = "\n".join(f"{k}: {v}" for k, v in fm.items() if v not in ("", None))
+    parts = [f"---\n{head}\n---\n", f"# {an.get('tytul') or code}\n"]
+    if an.get("streszczenie"):
+        parts.append(f"**Streszczenie:** {an['streszczenie']}\n")
+    parts += sections
+    parts.append(f"## Moje\n\n{moje.strip()}\n")
+    return "\n".join(parts)
+
+
+def write_note(notes: Path, code: str, url: str, info: dict, an: dict,
                caption: str, transcript: str, slides: str, recipe_md: str) -> None:
     notes.mkdir(parents=True, exist_ok=True)
-    parts = [f"---\nurl: {url}\nautor: {info.get('uploader') or info.get('channel') or ''}\n"
-             f"etykieta: {tag}\npobrano: {date.today()}\n---\n", f"# {code}\n"]
-    for title, body in (("Opis", caption), ("Transkrypcja", transcript),
-                        ("Tekst ze slajdow / z ekranu", slides)):
-        if body.strip():
-            parts.append(f"## {title}\n\n{body.strip()}\n")
+    d = info.get("upload_date") or ""
+    fm = {"url": url, "autor": info.get("uploader") or info.get("channel") or "",
+          "kategoria": an.get("kategoria", ""), "ocena": an.get("ocena", ""),
+          "data_posta": f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else "",
+          "pobrano": str(date.today())}
+    sections = [f"## {t}\n\n{b.strip()}\n" for t, b in
+                (("Opis", caption), ("Transkrypcja", transcript), ("Tekst ze slajdow / z ekranu", slides))
+                if b.strip()]
     if recipe_md and not recipe_md.lower().startswith("to nie przepis"):
-        parts.append(f"## Przepis\n\n{recipe_md}\n")
-    (notes / f"{code}.md").write_text("\n".join(parts), encoding="utf-8")
+        sections.append(f"## Przepis\n\n{recipe_md}\n")
+    (notes / f"{code}.md").write_text(note_text(fm, an, code, sections), encoding="utf-8")
+
+
+def resort(notes: Path) -> None:
+    """Przelicza kategorie/ocene/streszczenie dla istniejacych notatek; zachowuje sekcje 'Moje'."""
+    for f in sorted(notes.glob("*.md")):
+        t = f.read_text(encoding="utf-8")
+        m = re.match(r"---\n(.*?)\n---\n(.*)", t, re.S)
+        if not m:
+            continue
+        fm = dict(re.findall(r"^(\w+): (.*)$", m.group(1), re.M))
+        body = m.group(2)
+        i = body.find("\n## ")
+        rest, _, moje = (body[i:] if i >= 0 else "").partition("\n## Moje")
+        an = analyze(rest)
+        if not an:
+            print(f"  {f.name}: brak ANTHROPIC_API_KEY lub zla odpowiedz - pomijam")
+            continue
+        fm.pop("etykieta", None)
+        fm["kategoria"], fm["ocena"] = an["kategoria"], an["ocena"]
+        sections = [x for x in re.split(r"(?=^## )", rest.strip() + "\n", flags=re.M) if x.strip()]
+        f.write_text(note_text(fm, an, f.stem, sections, moje), encoding="utf-8")
+        print(f"  {f.name}: {an['kategoria']} / {an['ocena']}")
 
 
 def process(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: str = "") -> None:
@@ -156,7 +207,7 @@ def process(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: 
     slides = slide_text(dest) or frame_text(video, dest, text)
     source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW / Z EKRANU:\n{slides}"
     rec = recipe(source, dest)
-    write_note(notes, dest.name, url, info, label(source), caption, text, slides, rec)
+    write_note(notes, dest.name, url, info, analyze(source), caption, text, slides, rec)
 
 
 def main() -> int:
@@ -167,7 +218,11 @@ def main() -> int:
     ap.add_argument("--cookies", help="plik cookies.txt (Netscape); zamiast --browser")
     ap.add_argument("--out", default="ig_out")
     ap.add_argument("--notes", default="notes", help="folder na notatki .md (po jednej na post)")
+    ap.add_argument("--resort", action="store_true", help="przelicz kategorie/oceny istniejacych notatek")
     a = ap.parse_args()
+    if a.resort:
+        resort(Path(a.notes))
+        return 0
     urls = list(a.urls)
     if a.urls_file:
         urls += [l.strip() for l in Path(a.urls_file).read_text().splitlines() if l.strip()]
