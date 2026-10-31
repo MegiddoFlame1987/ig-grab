@@ -9,7 +9,7 @@ Uzycie:
     python ig_grab.py --browser chrome --urls-file linki.txt --out ig_out
 Przepis (opcjonalnie): ustaw ANTHROPIC_API_KEY. Bez klucza dostajesz tylko transkrypcje.
 """
-import argparse, json, os, re, subprocess, sys
+import argparse, json, os, re, subprocess, sys, urllib.request
 from pathlib import Path
 
 
@@ -18,14 +18,35 @@ def shortcode(url: str) -> str:
     return m.group(1) if m else re.sub(r"\W+", "_", url)[-24:]
 
 
-def download(url: str, dest: Path, browser: str, cookies: str = "") -> None:
+def download(url: str, dest: Path, browser: str, cookies: str = "") -> dict:
     auth = ["--cookies", cookies] if cookies else ["--cookies-from-browser", browser]
-    subprocess.run(
-        ["yt-dlp", *auth, "--write-info-json",
-         "--write-thumbnail", "--sleep-requests", "2",
-         "-o", str(dest / "media.%(ext)s"), url],
-        check=True,
-    )
+    base = ["yt-dlp", *auth, "--ignore-no-formats-error", "--sleep-requests", "2"]
+    # pelne info (karuzela ma wpisy-slajdy; --write-info-json zapisuje tylko playliste bez nich)
+    r = subprocess.run([*base, "-J", url], capture_output=True, text=True)
+    if not r.stdout.strip():
+        raise RuntimeError(r.stderr.strip()[-400:] or "yt-dlp nie zwrocil danych")
+    info = json.loads(r.stdout)
+    (dest / "media.info.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+    # wideo/miniatura; slajdy-zdjecia daja tu blad, ktory ignorujemy (zdjecia bierze save_photos)
+    subprocess.run([*base, "--write-thumbnail", "-o", str(dest / "media.%(ext)s"), url],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return info
+
+
+def save_photos(info: dict, dest: Path) -> int:
+    """Karuzele/zdjecia: yt-dlp nie ma 'formatow', ale zna adresy obrazow (najwieksza miniatura = oryginal)."""
+    entries = info.get("entries") or ([info] if info.get("thumbnails") else [])
+    n = 0
+    for e in entries:
+        if e.get("formats") or e.get("url"):
+            continue  # slajd-wideo pobiera yt-dlp
+        thumbs = [t for t in e.get("thumbnails") or [] if t.get("url")]
+        if not thumbs:
+            continue
+        best = max(thumbs, key=lambda t: (t.get("width") or 0) * (t.get("height") or 0))
+        n += 1
+        urllib.request.urlretrieve(best["url"], dest / f"photo_{n:02d}.jpg")
+    return n
 
 
 def transcribe(video: Path, dest: Path) -> str:
@@ -73,10 +94,12 @@ def main() -> int:
         dest.mkdir(parents=True, exist_ok=True)
         print(f"-> {url}")
         try:
-            download(url, dest, a.browser, a.cookies)
-            info = json.loads(next(dest.glob("media.info.json")).read_text(encoding="utf-8"))
+            info = download(url, dest, a.browser, a.cookies)
             caption = info.get("description") or ""
             (dest / "caption.txt").write_text(caption, encoding="utf-8")
+            photos = save_photos(info, dest)
+            if photos:
+                print(f"  zdjec: {photos}")
             video = next(dest.glob("media.mp4"), None)
             text = transcribe(video, dest) if video else ""
             recipe(caption, text, dest)
