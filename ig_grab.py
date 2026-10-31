@@ -53,7 +53,7 @@ def save_photos(info: dict, dest: Path) -> int:
 def transcribe(video: Path, dest: Path) -> str:
     from faster_whisper import WhisperModel
     model = WhisperModel("small", compute_type="int8")
-    segments, _ = model.transcribe(str(video))  # jezyk wykrywany automatycznie
+    segments, _ = model.transcribe(str(video), vad_filter=True)  # jezyk auto; vad ucina halucynacje na muzyce
     text = "\n".join(s.text.strip() for s in segments)
     (dest / "transcript.txt").write_text(text, encoding="utf-8")
     return text
