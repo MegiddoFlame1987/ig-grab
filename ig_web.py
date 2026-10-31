@@ -71,31 +71,85 @@ def read_notes() -> list:
     return out
 
 
-def page(q: str = "", tag: str = "") -> str:
-    st = load()
-    notes = read_notes()
-    tags = sorted({n["tag"] for n in notes if n["tag"]})
-    shown = [n for n in notes if (not tag or n["tag"] == tag) and q.lower() in n["text"].lower()]
-    used, lim = today_count(st), CFG["limit"]
-    e = html.escape
-    rows = "".join(
-        f"<li><a href='/note?id={e(n['id'])}'>{e(n['id'])}</a> "
-        f"<b>{e(n['tag'])}</b> <small>{e(n['autor'])}</small></li>" for n in shown)
-    tag_links = " ".join(f"<a href='/?tag={e(t)}'>{e(t)}</a>" for t in tags)
-    queue = "".join(f"<li>{e(u)}</li>" for u in st["queue"])
-    log = "".join(f"<li>{e(x['ts'])} {e(x['status'])} - {e(x['url'])}</li>" for x in st["log"][-8:][::-1])
-    return f"""<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=15>
-<title>ig-grab</title><style>body{{font:16px system-ui;max-width:820px;margin:2em auto;padding:0 1em}}
-textarea{{width:100%;height:5em}}li{{margin:.3em 0}}</style>
-<h1>ig-grab</h1>
-<p><b>Dzisiaj: {used}/{lim}</b> pobranych (limit chroni konto; po limicie kolejka czeka do jutra).
-W kolejce: {len(st['queue'])}.</p>
-<form method=post action=/add><textarea name=urls placeholder="wklej linki, jeden pod drugim"></textarea>
-<button>Dodaj do kolejki</button></form>
-<ul>{queue}</ul><details><summary>Ostatnie</summary><ul>{log}</ul></details>
-<h2>Notatki ({len(shown)}/{len(notes)})</h2>
-<form><input name=q value="{e(q)}" placeholder="szukaj w tresci"><button>Szukaj</button>
-<a href=/>wszystko</a></form><p>{tag_links}</p><ul>{rows}</ul>"""
+INDEX = r"""<!doctype html><html lang=pl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>ig-grab</title>
+<style>
+:root{--bg:#fff;--bg2:#f5f5f7;--fg:#1d1d1f;--mut:#6e6e73;--line:#e2e2e6;--acc:#7c3aed;--accbg:#ede9fe}
+@media(prefers-color-scheme:dark){:root{--bg:#1e1e1e;--bg2:#262626;--fg:#dcddde;--mut:#8b8d90;--line:#363636;--acc:#a78bfa;--accbg:#2e2748}}
+*{box-sizing:border-box}body{margin:0;font:15px/1.55 system-ui,sans-serif;background:var(--bg);color:var(--fg);height:100vh;display:flex}
+a{color:var(--acc);text-decoration:none}
+#side{width:340px;min-width:260px;background:var(--bg2);border-right:1px solid var(--line);display:flex;flex-direction:column}
+#side header{padding:14px;border-bottom:1px solid var(--line)}
+#side h1{font-size:17px;margin:0 0 8px}
+input,textarea,button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+input{width:100%}textarea{width:100%;height:84px;resize:vertical}
+button{cursor:pointer;background:var(--acc);color:#fff;border:0}button:hover{opacity:.9}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{padding:2px 10px;border-radius:99px;background:var(--bg);border:1px solid var(--line);cursor:pointer;font-size:13px;color:var(--mut)}
+.chip.on{background:var(--accbg);color:var(--acc);border-color:var(--acc)}
+#list{overflow:auto;flex:1}
+.item{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+.item:hover{background:var(--bg)}.item.on{background:var(--accbg)}
+.item b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item small{color:var(--mut)}
+#main{flex:1;overflow:auto;padding:28px 40px}
+#note{max-width:760px;margin:0 auto}
+#note h1{font-size:24px}#note h2{font-size:18px;margin-top:1.6em;border-bottom:1px solid var(--line);padding-bottom:4px}
+#note h3{font-size:15px;margin-top:1.2em;color:var(--mut)}
+#note p{white-space:pre-wrap;margin:.5em 0}#note li{margin:.2em 0}
+.meta{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px;font-size:13px;color:var(--mut)}
+.rel{margin-top:2em;padding-top:1em;border-top:1px solid var(--line);font-size:14px}.rel a{display:block;margin:3px 0}
+details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px}
+.empty{color:var(--mut);margin-top:30vh;text-align:center}
+@media(max-width:760px){body{flex-direction:column;height:auto}#side{width:100%}#main{padding:16px}}
+</style>
+<aside id=side><header>
+ <h1>ig-grab <small id=quota style="font-weight:400;color:var(--mut)"></small></h1>
+ <details><summary>Dodaj linki do kolejki</summary>
+  <textarea id=urls placeholder="wklej linki, jeden pod drugim"></textarea>
+  <button onclick=add()>Dodaj do kolejki</button>
+  <div id=queue></div></details>
+ <input id=q placeholder="szukaj w treści notatek" oninput=render() style="margin-top:10px">
+ <div class=chips id=chips></div>
+</header><div id=list></div></aside>
+<main id=main><div id=note><p class=empty>Wybierz notatkę z listy.</p></div></main>
+<script>
+let S={notes:[],queue:[],log:[],used:0,limit:0},sel=null,tag="";
+const esc=t=>t.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const inl=t=>esc(t).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target=_blank>$1</a>');
+function md(t){let h="",ul=false,para=[];
+ const fl=()=>{if(para.length){h+="<p>"+para.map(inl).join("\n")+"</p>";para=[]}};
+ for(const l of t.split("\n")){
+  let m;
+  if(m=l.match(/^(#{1,3}) (.*)/)){fl();if(ul){h+="</ul>";ul=false}h+=`<h${m[1].length}>${inl(m[2])}</h${m[1].length}>`}
+  else if(m=l.match(/^[-*] (.*)/)){fl();if(!ul){h+="<ul>";ul=true}h+="<li>"+inl(m[1])+"</li>"}
+  else if(!l.trim()){fl();if(ul){h+="</ul>";ul=false}}
+  else{if(ul){h+="</ul>";ul=false}para.push(l)}}
+ fl();if(ul)h+="</ul>";return h}
+function body(n){return n.text.replace(/^---[\s\S]*?---\s*/,"")}
+function render(){
+ const q=document.getElementById("q").value.toLowerCase();
+ const tags=[...new Set(S.notes.map(n=>n.tag).filter(Boolean))].sort();
+ document.getElementById("chips").innerHTML=tags.map(t=>`<span class="chip ${t==tag?"on":""}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join("");
+ const shown=S.notes.filter(n=>(!tag||n.tag==tag)&&n.text.toLowerCase().includes(q));
+ document.getElementById("list").innerHTML=shown.map(n=>{
+  const title=(body(n).match(/^## Opis\s+([^\n]+)/m)||[])[1]||n.id;
+  return `<div class="item ${n.id==sel?"on":""}" onclick="pick('${esc(n.id)}')"><b>${esc(title.slice(0,80))}</b><small>${esc(n.tag)} · ${esc(n.autor)}</small></div>`}).join("")||'<p class=empty style="margin:20px">Brak notatek.</p>';
+ document.getElementById("quota").textContent=`dziś ${S.used}/${S.limit} · kolejka ${S.queue.length}`;
+ document.getElementById("queue").innerHTML="<ul>"+S.queue.map(u=>"<li>"+esc(u)+"</li>").join("")+"</ul><ul>"+S.log.slice(-6).reverse().map(x=>"<li>"+esc(x.ts+" "+x.status)+"</li>").join("")+"</ul>";
+}
+function setTag(t){tag=tag==t?"":t;render()}
+function pick(id){sel=id;const n=S.notes.find(x=>x.id==id);if(!n)return;
+ const rel=S.notes.filter(x=>x.tag==n.tag&&x.id!=id).slice(0,8);
+ document.getElementById("note").innerHTML=
+  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><a href="${esc(n.url)}" target=_blank>oryginał ↗</a></div>`+md(body(n))+
+  (rel.length?`<div class=rel><b>Podobne (${esc(n.tag)})</b>`+rel.map(r=>`<a href=# onclick="pick('${esc(r.id)}');return false">${esc(r.id)}</a>`).join("")+"</div>":"");
+ render();document.getElementById("main").scrollTop=0}
+async function load(){try{S=await (await fetch("/api/state")).json();render()}catch(e){}}
+async function add(){const t=document.getElementById("urls");
+ await fetch("/add",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"urls="+encodeURIComponent(t.value)});t.value="";load()}
+load();setInterval(load,10000);
+</script></html>"""
 
 
 class H(BaseHTTPRequestHandler):
@@ -113,12 +167,17 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
-        if u.path == "/note":
-            f = Path(CFG["notes"]) / (re.sub(r"[^\w-]", "", q.get("id", [""])[0]) + ".md")
-            body = html.escape(f.read_text(encoding="utf-8")) if f.exists() else "brak"
-            return self.send(f"<meta charset=utf-8><a href=/>wstecz</a><pre style='white-space:pre-wrap;"
-                             f"font:15px system-ui;max-width:820px;margin:1em auto'>{body}</pre>")
-        self.send(page(q.get("q", [""])[0], q.get("tag", [""])[0]))
+        if u.path == "/api/state":
+            st = load()
+            data = {"notes": [{k: n[k] for k in ("id", "tag", "autor", "url", "text")} for n in read_notes()],
+                    "queue": st["queue"], "log": st["log"], "used": today_count(st), "limit": CFG["limit"]}
+            b = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            return self.wfile.write(b)
+        self.send(INDEX)
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
