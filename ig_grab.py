@@ -138,6 +138,24 @@ def write_note(notes: Path, code: str, url: str, info: dict, tag: str,
     (notes / f"{code}.md").write_text("\n".join(parts), encoding="utf-8")
 
 
+def process(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: str = "") -> None:
+    """Jeden post: pobranie -> tekst -> notatka. Rzuca wyjatek przy bledzie."""
+    dest = out / shortcode(url)
+    dest.mkdir(parents=True, exist_ok=True)
+    info = download(url, dest, browser, cookies)
+    caption = info.get("description") or ""
+    (dest / "caption.txt").write_text(caption, encoding="utf-8")
+    photos = save_photos(info, dest)
+    if photos:
+        print(f"  zdjec: {photos}")
+    video = next(dest.glob("media.mp4"), None)
+    text = transcribe(video, dest) if video else ""
+    slides = slide_text(dest) or frame_text(video, dest, text)
+    source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW / Z EKRANU:\n{slides}"
+    rec = recipe(source, dest)
+    write_note(notes, dest.name, url, info, label(source), caption, text, slides, rec)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("urls", nargs="*")
@@ -155,23 +173,9 @@ def main() -> int:
 
     failed = []
     for url in urls:
-        dest = Path(a.out) / shortcode(url)
-        dest.mkdir(parents=True, exist_ok=True)
         print(f"-> {url}")
         try:
-            info = download(url, dest, a.browser, a.cookies)
-            caption = info.get("description") or ""
-            (dest / "caption.txt").write_text(caption, encoding="utf-8")
-            photos = save_photos(info, dest)
-            if photos:
-                print(f"  zdjec: {photos}")
-            video = next(dest.glob("media.mp4"), None)
-            text = transcribe(video, dest) if video else ""
-            slides = slide_text(dest) or frame_text(video, dest, text)
-            source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW / Z EKRANU:\n{slides}"
-            rec = recipe(source, dest)
-            write_note(Path(a.notes), dest.name, url, info, label(source),
-                       caption, text, slides, rec)
+            process(url, Path(a.out), Path(a.notes), a.browser, a.cookies or "")
         except Exception as e:  # jeden zly link nie zatrzymuje reszty
             print(f"  BLAD: {e}", file=sys.stderr)
             failed.append(url)

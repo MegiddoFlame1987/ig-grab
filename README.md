@@ -34,3 +34,8 @@ Zdjęcia z karuzel: tylko miniatura (ograniczenie yt-dlp).
 
 Scraping narusza regulamin Instagrama i konto może dostać ban. Używaj osobnego konta i trzymaj limit tempa.
 Nie commituj `cookies.txt` ani `ig_out/`.
+
+## Strona lokalna (ig_web.py)
+    python ig_web.py --cookies cookies.txt --limit 20
+Otworz http://127.0.0.1:8765, wklej linki. Kolejka idzie z limitem dziennym i losowymi przerwami (30-90 s),
+posty juz pobrane sa pomijane. Notatki: wyszukiwanie w tresci i filtr po etykiecie. Dziala tylko lokalnie.

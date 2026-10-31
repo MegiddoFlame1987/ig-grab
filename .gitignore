@@ -2,3 +2,4 @@ ig_out/
 cookies.txt
 __pycache__/
 notes/
+ig_state.json
