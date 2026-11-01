@@ -133,7 +133,7 @@ details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px
   <textarea id=nt placeholder="wklej tekst: dziennik, tweet, pomysł..." style="height:110px"></textarea>
   <input id=nti placeholder="tytuł (puste = Claude nada)" style="margin-top:6px">
   <input id=ntg placeholder="tagi po przecinku (puste = Claude nada)" style="margin-top:6px">
-  <select id=ntc style="margin:6px 0;width:100%;padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)"><option value="">kategoria: auto</option><option>ai</option><option>trading</option><option>przepis</option><option>biznes</option><option>inne</option></select>
+  <select id=ntc style="margin:6px 0;width:100%;padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)"><option value="">kategoria: auto</option><option>ai</option><option>trading</option><option>przepis</option><option>biznes</option><option>dziennik</option><option>inne</option></select>
   <button onclick=newNote()>Zapisz notatkę</button> <small id=ntst style="color:var(--mut)"></small></details>
  <details><summary>Dodaj linki do kolejki</summary>
   <textarea id=urls placeholder="wklej linki, jeden pod drugim"></textarea>
@@ -148,7 +148,7 @@ details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px
 </main>
 <script>
 let S={notes:[],queue:[],log:[],used:0,limit:0},sel=null,tag="",view="note",sig="";
-const CAT={ai:"#8b5cf6",trading:"#22c55e",przepis:"#f59e0b",biznes:"#3b82f6",inne:"#9ca3af"};
+const CAT={ai:"#8b5cf6",trading:"#22c55e",przepis:"#f59e0b",biznes:"#3b82f6",dziennik:"#ec4899",inne:"#9ca3af"};
 const col=c=>CAT[c]||"#9ca3af";
 const esc=t=>String(t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const $=id=>document.getElementById(id);
@@ -269,7 +269,7 @@ def create_note(d: dict) -> str:
     tags = [t.strip().lower() for t in str(d.get("tagi", "")).split(",") if t.strip()]
     an = {}
     if not (title and cat in ig_grab.CATEGORIES and tags):
-        an = ig_grab.analyze(text, ig_grab.known_tags(notes))
+        an = ig_grab.analyze(text, ig_grab.known_tags(notes), manual=True)
     title = title or an.get("tytul") or text.splitlines()[0][:60]
     cat = cat if cat in ig_grab.CATEGORIES else an.get("kategoria", "inne")
     tags = tags or an.get("tagi", [])

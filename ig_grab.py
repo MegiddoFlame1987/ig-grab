@@ -118,7 +118,7 @@ def recipe(source: str, dest: Path) -> str:
     return text
 
 
-CATEGORIES = ("ai", "trading", "przepis", "biznes", "inne")  # zmien tutaj, jesli chcesz inne kategorie
+CATEGORIES = ("ai", "trading", "przepis", "biznes", "dziennik", "inne")  # dziennik tylko dla notatek recznych  # zmien tutaj, jesli chcesz inne kategorie
 RATINGS = ("konkretna wiedza", "czesciowo", "reklama poradnika", "bez dowodu", "ciekawostka")
 RESERVED = {"INDEX.md", "CLAUDE.md"}  # pliki pomocnicze w notes/, nie sa notatkami
 
@@ -134,15 +134,16 @@ def known_tags(notes: Path, top: int = 40) -> list:
     return [t for t, _ in sorted(cnt.items(), key=lambda x: -x[1])[:top]]
 
 
-def analyze(source: str, known: list = ()) -> dict:
+def analyze(source: str, known: list = (), manual: bool = False) -> dict:
     """Jedno wywolanie: tytul, streszczenie, kategoria (lista zamknieta), ocena."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return {}
+    cats = CATEGORIES if manual else tuple(c for c in CATEGORIES if c != "dziennik")
     raw = _claude(
         "Przeczytaj tresc posta z Instagrama i zwroc WYLACZNIE obiekt JSON z polami:\n"
         '"tytul": konkretny tytul po polsku, max 70 znakow,\n'
         '"streszczenie": 2 zdania po polsku - co konkretnie z tego wynika (bez lania wody),\n'
-        f'"kategoria": dokladnie jedna z {list(CATEGORIES)},\n'
+        f'"kategoria": dokladnie jedna z {list(cats)},\n'
         f'"ocena": dokladnie jedna z {list(RATINGS)}. Wybierz "reklama poradnika", gdy prawdziwa '
         'tresc jest dostepna dopiero po komentarzu lub w DM, a sam post jej nie zawiera. '
         'Wybierz "bez dowodu", gdy post obiecuje wyniki, zyski lub skutecznosc (np. w tradingu), '
@@ -158,7 +159,7 @@ def analyze(source: str, known: list = ()) -> dict:
         return {}
     tags = d.get("tagi") if isinstance(d.get("tagi"), list) else []
     d["tagi"] = list(dict.fromkeys(t.strip().lower() for t in tags if isinstance(t, str) and t.strip()))[:5]
-    d["kategoria"] = d.get("kategoria") if d.get("kategoria") in CATEGORIES else "inne"
+    d["kategoria"] = d.get("kategoria") if d.get("kategoria") in cats else "inne"
     d["ocena"] = d.get("ocena") if d.get("ocena") in RATINGS else "czesciowo"
     return d
 
@@ -200,6 +201,8 @@ def resort(notes: Path) -> None:
         if not m:
             continue
         fm = dict(re.findall(r"^(\w+): (.*)$", m.group(1), re.M))
+        if fm.get("ocena") == "moja notatka":
+            continue  # notatki reczne zostaja jak sa
         body = m.group(2)
         i = body.find("\n## ")
         rest, _, moje = (body[i:] if i >= 0 else "").partition("\n## Moje")
