@@ -4,7 +4,7 @@
 Uruchom:  python ig_web.py --cookies cookies.txt     (potem http://127.0.0.1:8765)
 Dziala tylko na 127.0.0.1. Limit dzienny i losowe przerwy chronia konto przed blokada.
 """
-import argparse, html, json, random, re, threading, time
+import argparse, html, json, os, random, re, threading, time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -127,6 +127,7 @@ details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px
 @media(max-width:760px){body{flex-direction:column;height:auto}#side{width:100%}#noteView{padding:16px}}
 </style>
 <aside id=side><header>
+ <div id=nokey hidden style="background:#fee2e2;color:#991b1b;padding:8px 10px;border-radius:8px;margin-bottom:10px;font-size:13px">Brak ANTHROPIC_API_KEY w oknie, w którym działa strona. Nowe posty zapiszą się <b>bez tytułu, kategorii i tekstu ze slajdów</b>. Ustaw klucz i zrestartuj stronę.</div>
  <h1>ig-grab <small id=quota style="font-weight:400;color:var(--mut)"></small></h1>
  <div class=seg><button id=bNote class=on onclick="setView('note')">Notatka</button><button id=bMap onclick="setView('map')">Mapa</button></div>
  <details><summary>Nowa notatka (wklej tekst)</summary>
@@ -167,6 +168,7 @@ async function saveMy(id){const t=$("my");
  await fetch("/api/my",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,text:t.value})});
  $("saved").textContent="zapisano";await load();sel=id}
 function render(){
+ $("nokey").hidden=S.key!==false;
  const q=$("q").value.toLowerCase();
  const cats=[...new Set(S.notes.map(n=>n.tag).filter(Boolean))].sort();
  $("chips").innerHTML=cats.map(t=>`<span class="chip ${t==tag?"on":""}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join("");
@@ -313,7 +315,8 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/state":
             st = load()
             data = {"notes": [{k: n[k] for k in ("id", "tag", "ocena", "data", "tagi", "tytul", "autor", "url", "text")} for n in read_notes()],
-                    "queue": st["queue"], "log": st["log"], "used": today_count(st), "limit": CFG["limit"]}
+                    "queue": st["queue"], "log": st["log"], "used": today_count(st), "limit": CFG["limit"],
+                    "key": bool(os.environ.get("ANTHROPIC_API_KEY"))}
             b = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -363,6 +366,8 @@ def main() -> None:
     ig_grab.refresh_index(Path(a.notes))
     threading.Thread(target=worker, daemon=True).start()
     print(f"http://127.0.0.1:{a.port}  (limit {a.limit}/dzien)")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("UWAGA: brak ANTHROPIC_API_KEY w tym oknie - notatki beda bez tytulu, kategorii i tekstu ze slajdow.")
     ThreadingHTTPServer(("127.0.0.1", a.port), H).serve_forever()
 
 
