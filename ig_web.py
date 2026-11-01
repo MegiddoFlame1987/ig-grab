@@ -129,6 +129,12 @@ details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px
 <aside id=side><header>
  <h1>ig-grab <small id=quota style="font-weight:400;color:var(--mut)"></small></h1>
  <div class=seg><button id=bNote class=on onclick="setView('note')">Notatka</button><button id=bMap onclick="setView('map')">Mapa</button></div>
+ <details><summary>Nowa notatka (wklej tekst)</summary>
+  <textarea id=nt placeholder="wklej tekst: dziennik, tweet, pomysł..." style="height:110px"></textarea>
+  <input id=nti placeholder="tytuł (puste = Claude nada)" style="margin-top:6px">
+  <input id=ntg placeholder="tagi po przecinku (puste = Claude nada)" style="margin-top:6px">
+  <select id=ntc style="margin:6px 0;width:100%;padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)"><option value="">kategoria: auto</option><option>ai</option><option>trading</option><option>przepis</option><option>biznes</option><option>inne</option></select>
+  <button onclick=newNote()>Zapisz notatkę</button> <small id=ntst style="color:var(--mut)"></small></details>
  <details><summary>Dodaj linki do kolejki</summary>
   <textarea id=urls placeholder="wklej linki, jeden pod drugim"></textarea>
   <button onclick=add()>Dodaj do kolejki</button>
@@ -174,13 +180,16 @@ function searchTag(t){$("q").value=t;setView("note");render()}
 function pick(id){sel=id;setView("note",true);const n=S.notes.find(x=>x.id==id);if(!n)return;
  const rel=S.notes.filter(x=>x.id!=id).map(x=>({n:x,sh:x.tagi.filter(t=>n.tagi.includes(t))})).filter(r=>r.sh.length).sort((a,b)=>b.sh.length-a.sh.length).slice(0,8);
  $("note").innerHTML=
-  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><span>${esc(n.ocena)}</span><span>${esc(n.data)}</span><a href="${esc(n.url)}" target=_blank>oryginał ↗</a></div>`+md(body(n))+
+  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><span>${esc(n.ocena)}</span><span>${esc(n.data)}</span>${/^https?:/.test(n.url)?`<a href="${esc(n.url)}" target=_blank>oryginał ↗</a>`:""}</div>`+md(body(n))+
   `<h2>Moje</h2><textarea id=my style="height:110px" placeholder="twoja notatka: co z tym zrobić, gdzie wykorzystać">${esc(moje(n))}</textarea><button onclick="saveMy('${esc(n.id)}')">Zapisz</button> <small id=saved style="color:var(--mut)"></small>`;
  $("rail").innerHTML=`<h3>Tagi</h3><div class=chips style="margin:0">${n.tagi.map(t=>`<span class=chip onclick="searchTag('${esc(t)}')">${esc(t)}</span>`).join("")||"<small>brak</small>"}</div>`+
   `<h3>Powiązane (wspólne tagi)</h3>`+(rel.map(r=>`<a class=rel href=# onclick="pick('${esc(r.n.id)}');return false">${esc(r.n.tytul)}<small>${esc(r.sh.join(", "))}</small></a>`).join("")||"<small>brak powiązań</small>");
  render();$("main").scrollTop=0}
 async function load(){try{S=await (await fetch("/api/state")).json();render();
  const s2=S.notes.map(n=>n.id+n.tagi.join()).join("|");if(s2!=sig){sig=s2;if(G||view=="map")buildGraph()}}catch(e){}}
+async function newNote(){const t=$("nt").value.trim();if(!t)return;$("ntst").textContent="zapisuję…";
+ const r=await (await fetch("/api/new",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:t,title:$("nti").value,tagi:$("ntg").value,kategoria:$("ntc").value})})).json();
+ $("nt").value=$("nti").value=$("ntg").value="";$("ntc").value="";$("ntst").textContent="zapisano";await load();if(r.id)pick(r.id)}
 async function add(){const t=$("urls");
  await fetch("/add",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"urls="+encodeURIComponent(t.value)});t.value="";load()}
 
@@ -250,6 +259,34 @@ load();setInterval(load,10000);
 </script></html>"""
 
 
+def create_note(d: dict) -> str:
+    """Reczna notatka (np. dziennik, tweet). Puste pola uzupelnia Claude, jesli jest klucz API."""
+    text = str(d.get("text", "")).strip()
+    if not text:
+        return ""
+    notes = Path(CFG["notes"])
+    title, cat = str(d.get("title", "")).strip(), str(d.get("kategoria", "")).strip()
+    tags = [t.strip().lower() for t in str(d.get("tagi", "")).split(",") if t.strip()]
+    an = {}
+    if not (title and cat in ig_grab.CATEGORIES and tags):
+        an = ig_grab.analyze(text, ig_grab.known_tags(notes))
+    title = title or an.get("tytul") or text.splitlines()[0][:60]
+    cat = cat if cat in ig_grab.CATEGORIES else an.get("kategoria", "inne")
+    tags = tags or an.get("tagi", [])
+    base = re.sub(r"[^\w]+", "-", title.lower())[:40].strip("-") or "notatka"
+    slug, i = f"{base}-{date.today()}", 2
+    while (notes / f"{slug}.md").exists():
+        slug, i = f"{base}-{date.today()}-{i}", i + 1
+    fm = {"autor": "ja", "kategoria": cat, "ocena": "moja notatka", "tagi": ", ".join(tags),
+          "data_posta": str(date.today()), "pobrano": str(date.today())}
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / f"{slug}.md").write_text(ig_grab.note_text(
+        fm, {"tytul": title, "streszczenie": an.get("streszczenie", "")}, slug,
+        [f"## Tresc\n\n{text}\n"]), encoding="utf-8")
+    ig_grab.refresh_index(notes)
+    return slug
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -258,6 +295,14 @@ class H(BaseHTTPRequestHandler):
         b = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def send_json(self, data) -> None:
+        b = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
@@ -279,6 +324,9 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
+        if self.path == "/api/new":
+            d = json.loads(self.rfile.read(n).decode("utf-8"))
+            return self.send_json({"id": create_note(d)})
         if self.path == "/api/my":
             d = json.loads(self.rfile.read(n).decode("utf-8"))
             f = Path(CFG["notes"]) / (re.sub(r"[^\w-]", "", d.get("id", "")) + ".md")
