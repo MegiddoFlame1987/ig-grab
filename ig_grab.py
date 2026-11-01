@@ -191,7 +191,7 @@ def write_note(notes: Path, code: str, url: str, info: dict, an: dict,
     (notes / f"{code}.md").write_text(note_text(fm, an, code, sections), encoding="utf-8")
 
 
-def resort(notes: Path) -> None:
+def resort(notes: Path, out: Path = Path("ig_out")) -> None:
     """Przelicza kategorie/ocene/streszczenie dla istniejacych notatek; zachowuje sekcje 'Moje'."""
     for f in sorted(notes.glob("*.md")):
         if f.name in RESERVED:
@@ -206,6 +206,13 @@ def resort(notes: Path) -> None:
         body = m.group(2)
         i = body.find("\n## ")
         rest, _, moje = (body[i:] if i >= 0 else "").partition("\n## Moje")
+        d = out / f.stem
+        if "## Tekst ze slajdow" not in rest and d.exists():  # odzysk tekstu z ig_out (np. brak klucza przy pobraniu)
+            tr = (d / "transcript.txt").read_text(encoding="utf-8") if (d / "transcript.txt").exists() else ""
+            sl = slide_text(d) or frame_text(next(d.glob("media.mp4"), None), d, tr)
+            if sl:
+                rest = rest.rstrip() + f"\n\n## Tekst ze slajdow / z ekranu\n\n{sl}\n"
+                print(f"  {f.name}: odzyskano tekst ze slajdow/klatek")
         an = analyze(rest, known_tags(notes))
         if not an:
             print(f"  {f.name}: brak ANTHROPIC_API_KEY lub zla odpowiedz - pomijam")
@@ -283,7 +290,7 @@ def main() -> int:
     ap.add_argument("--resort", action="store_true", help="przelicz kategorie/oceny istniejacych notatek")
     a = ap.parse_args()
     if a.resort:
-        resort(Path(a.notes))
+        resort(Path(a.notes), Path(a.out))
         return 0
     urls = list(a.urls)
     if a.urls_file:
