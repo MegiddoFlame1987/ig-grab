@@ -5,7 +5,7 @@ Instagram URL -> folder z wideo, miniaturą, opisem, transkrypcją i przepisem. 
 ## Setup
 
 ```bash
-pip install yt-dlp faster-whisper anthropic "av<17"   # av 17+ psuje faster-whisper
+pip install yt-dlp faster-whisper anthropic "av<17" trafilatura pypdf   # av 17+ psuje faster-whisper
 ```
 
 Potrzebny też `ffmpeg` (`brew install ffmpeg` lub `apt install ffmpeg`).
@@ -39,3 +39,9 @@ Nie commituj `cookies.txt` ani `ig_out/`.
     python ig_web.py --cookies cookies.txt --limit 20
 Otworz http://127.0.0.1:8765, wklej linki. Kolejka idzie z limitem dziennym i losowymi przerwami (30-90 s),
 posty juz pobrane sa pomijane. Notatki: wyszukiwanie w tresci i filtr po etykiecie. Dziala tylko lokalnie.
+
+## Zrodla (nie tylko Instagram)
+Do kolejki (strona) lub w wierszu polecen mozna podac: Instagram, YouTube (napisy lub Whisper, na stronie osadzony odtwarzacz),
+dowolna strone WWW (trafilatura) i link do PDF-a. Kazda notatka ma `typ`, `url` i `sha256` tresci zrodlowej (plik `source.txt`
+w `ig_out/<id>/`). Limit dzienny dotyczy tylko Instagrama. Adresy lokalne i prywatne sa odrzucane.
+SHA-256 to odcisk (dowod, ze tresc sie nie zmienila), nie szyfrowanie i nie dowod prawdziwosci.

@@ -1,22 +1,70 @@
 #!/usr/bin/env python3
-"""ig_grab: Instagram URL -> folder z wideo, zdjeciami, opisem, transkrypcja i przepisem.
+"""ig_grab: link (Instagram, YouTube, strona WWW, PDF) -> folder ze zrodlem + notatka (tytul, kategoria, tagi, odcisk SHA-256).
 
 Setup (raz):
-    pip install yt-dlp faster-whisper anthropic "av<17"   # av 17+ psuje faster-whisper
+    pip install yt-dlp faster-whisper anthropic "av<17" trafilatura pypdf   # av 17+ psuje faster-whisper
     brew install ffmpeg   # lub apt install ffmpeg
 Uzycie:
     python ig_grab.py --browser chrome URL [URL ...]   # lub --cookies cookies.txt
     python ig_grab.py --browser chrome --urls-file linki.txt --out ig_out
 Przepis (opcjonalnie): ustaw ANTHROPIC_API_KEY. Bez klucza dostajesz tylko transkrypcje.
 """
-import argparse, base64, json, os, re, shutil, subprocess, sys, urllib.request
+import argparse, base64, hashlib, io, ipaddress, json, os, re, shutil, socket, subprocess, sys, urllib.request
+from urllib.parse import parse_qs, urlparse
 from datetime import date
 from pathlib import Path
 
 
+ALLOW_PRIVATE = False  # tylko dla testow: pozwala pobierac z localhost
+
+
+def kind(url: str) -> str:
+    h = (urlparse(url if "//" in url else "https://" + url).hostname or "").lower()
+    if h.endswith("instagram.com"):
+        return "instagram"
+    if h.endswith("youtube.com") or h == "youtu.be" or h.endswith("youtube-nocookie.com"):
+        return "youtube"
+    return "web"
+
+
 def shortcode(url: str) -> str:
+    k = kind(url)
+    if k == "youtube":
+        u = urlparse(url)
+        vid = (parse_qs(u.query).get("v") or [u.path.rstrip("/").split("/")[-1]])[0]
+        return "yt-" + re.sub(r"[^\w-]", "", vid)
+    if k == "web":
+        return "web-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
     m = re.search(r"instagram\.com/(?:[^/]+/)?(?:reels?|p|tv)/([\w-]+)", url)
     return m.group(1) if m else re.sub(r"\W+", "_", url)[-24:]
+
+
+def write_source(dest: Path, source: str) -> str:
+    """Zapisuje tresc zrodlowa (to, co czytal Claude) i zwraca jej SHA-256. Bajty, nie tekst: bez zmian konca linii."""
+    b = source.encode("utf-8")
+    (dest / "source.txt").write_bytes(b)
+    return hashlib.sha256(b).hexdigest()
+
+
+def check_public(url: str) -> None:
+    """Odrzuca adresy lokalne/prywatne (serwer nie ma pobierac wnetrza Twojej sieci)."""
+    if ALLOW_PRIVATE:
+        return
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise RuntimeError("tylko adresy http/https")
+    for info in socket.getaddrinfo(u.hostname, None):
+        if not ipaddress.ip_address(info[4][0]).is_global:
+            raise RuntimeError(f"adres lokalny lub prywatny odrzucony: {u.hostname}")
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_public(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_SafeRedirect)
 
 
 def download(url: str, dest: Path, browser: str, cookies: str = "") -> dict:
@@ -175,16 +223,17 @@ def note_text(fm: dict, an: dict, code: str, sections: list, moje: str = "") -> 
 
 
 def write_note(notes: Path, code: str, url: str, info: dict, an: dict,
-               caption: str, transcript: str, slides: str, recipe_md: str) -> None:
+               caption: str, transcript: str, slides: str, recipe_md: str,
+               typ: str = "instagram", sha: str = "", extra: tuple = ()) -> None:
     notes.mkdir(parents=True, exist_ok=True)
     d = info.get("upload_date") or ""
     fm = {"url": url, "autor": info.get("uploader") or info.get("channel") or "",
           "kategoria": an.get("kategoria", ""), "ocena": an.get("ocena", ""),
-          "tagi": ", ".join(an.get("tagi", [])),
+          "tagi": ", ".join(an.get("tagi", [])), "typ": typ, "sha256": sha,
           "data_posta": f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else "",
           "pobrano": str(date.today())}
     sections = [f"## {t}\n\n{b.strip()}\n" for t, b in
-                (("Opis", caption), ("Transkrypcja", transcript), ("Tekst ze slajdow / z ekranu", slides))
+                (("Opis", caption), ("Transkrypcja", transcript), ("Tekst ze slajdow / z ekranu", slides), *extra)
                 if b.strip()]
     if recipe_md and not recipe_md.lower().startswith("to nie przepis"):
         sections.append(f"## Przepis\n\n{recipe_md}\n")
@@ -274,9 +323,112 @@ def process(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: 
     text = transcribe(video, dest) if video else ""
     slides = slide_text(dest) or frame_text(video, dest, text)
     source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW / Z EKRANU:\n{slides}"
+    sha = write_source(dest, source)
     rec = recipe(source, dest)
-    write_note(notes, dest.name, url, info, analyze(source, known_tags(notes)), caption, text, slides, rec)
+    write_note(notes, dest.name, url, info, analyze(source, known_tags(notes)), caption, text, slides, rec,
+               typ="instagram", sha=sha)
     refresh_index(notes)
+
+
+def vtt_to_text(p: Path) -> str:
+    out, last = [], ""
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith(("WEBVTT", "Kind:", "Language:", "NOTE")) or "-->" in line:
+            continue
+        line = re.sub(r"<[^>]+>", "", line).strip()
+        if line and line != last:  # napisy automatyczne powtarzaja linie miedzy kadrami
+            out.append(line)
+            last = line
+    return "\n".join(out)
+
+
+def process_youtube(url: str, out: Path, notes: Path) -> None:
+    """YouTube: metadane + napisy (bez pobierania wideo; strona osadza odtwarzacz). Brak napisow -> Whisper (<=30 min)."""
+    dest = out / shortcode(url)
+    dest.mkdir(parents=True, exist_ok=True)
+    base = [sys.executable, "-m", "yt_dlp", "--no-playlist"]
+    r = subprocess.run([*base, "-J", url], capture_output=True, text=True)
+    if not r.stdout.strip():
+        raise RuntimeError(r.stderr.strip()[-400:] or "yt-dlp nie zwrocil danych")
+    info = json.loads(r.stdout)
+    if info.get("entries"):
+        raise RuntimeError("playlisty nieobslugiwane - podaj link do pojedynczego filmu")
+    (dest / "media.info.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+    subprocess.run([*base, "--skip-download", "--write-subs", "--write-auto-subs", "--sub-langs",
+                    "pl,pl-orig,en,en-orig", "--sub-format", "vtt", "-o", str(dest / "subs.%(ext)s"), url],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subs = {p.name.split(".")[1]: p for p in dest.glob("subs.*.vtt")}
+    text = vtt_to_text(next((subs[l] for l in ("pl", "pl-orig", "en", "en-orig") if l in subs), None)) if subs else ""
+    if not text and (info.get("duration") or 0) <= 1800:
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("brak ffmpeg w PATH")
+        subprocess.run([*base, "-f", "bestaudio/best", "-x", "--audio-format", "mp3", "-o",
+                        str(dest / "audio.%(ext)s"), url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        audio = next(dest.glob("audio.*"), None)
+        text = transcribe(audio, dest) if audio else ""
+    if not text:
+        raise RuntimeError("brak napisow, a film jest za dlugi na transkrypcje (>30 min) lub niedostepny")
+    if info.get("thumbnail"):
+        try:
+            urllib.request.urlretrieve(info["thumbnail"], dest / "media.jpg")
+        except Exception:
+            pass
+    caption = (info.get("description") or "")[:4000]
+    source = (f"TYTUL:\n{info.get('title', '')}\nKANAL:\n{info.get('channel', '')}\n\n"
+              f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}")
+    sha = write_source(dest, source)
+    an = analyze(source, known_tags(notes))
+    an.setdefault("tytul", info.get("title") or dest.name)
+    write_note(notes, dest.name, info.get("webpage_url") or url, info, an, caption, text[:60000], "", "",
+               typ="youtube", sha=sha)
+    refresh_index(notes)
+
+
+def pdf_text(raw: bytes) -> str:
+    from pypdf import PdfReader
+    return "\n\n".join((pg.extract_text() or "") for pg in PdfReader(io.BytesIO(raw)).pages[:80])
+
+
+def process_web(url: str, out: Path, notes: Path) -> None:
+    """Strona WWW lub PDF: surowy plik + wyciagniety tekst (trafilatura / pypdf)."""
+    check_public(url)
+    dest = out / shortcode(url)
+    dest.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; ig-grab)",
+                                               "Accept-Language": "pl,en;q=0.8"})
+    with _opener.open(req, timeout=30) as r:
+        ctype, charset, raw = r.headers.get("Content-Type", ""), r.headers.get_content_charset() or "utf-8", r.read(8_000_000)
+    host = urlparse(url).hostname or ""
+    title, meta_date, site = Path(urlparse(url).path).name or host, "", host
+    if "pdf" in ctype.lower() or urlparse(url).path.lower().endswith(".pdf"):
+        (dest / "source.pdf").write_bytes(raw)
+        text = pdf_text(raw)
+    else:
+        (dest / "source.html").write_bytes(raw)
+        import trafilatura
+        html = raw.decode(charset, errors="replace")
+        text = trafilatura.extract(html, include_tables=True) or ""
+        md = trafilatura.extract_metadata(html)
+        if md:
+            title, meta_date, site = md.title or title, (md.date or "").replace("-", "")[:8], md.sitename or md.author or host
+    if len(text.strip()) < 200:
+        raise RuntimeError("za malo tresci (strona wymaga JavaScriptu lub logowania?)")
+    source = f"TYTUL:\n{title}\nADRES:\n{url}\n\nTRESC:\n{text}"
+    sha = write_source(dest, source)
+    an = analyze(source, known_tags(notes))
+    an.setdefault("tytul", title)
+    body = text if len(text) <= 60000 else text[:60000] + "\n\n[obcieto]"
+    write_note(notes, dest.name, url, {"uploader": site, "upload_date": meta_date}, an, "", "", "", "",
+               typ="web", sha=sha, extra=(("Tresc", body),))
+    refresh_index(notes)
+
+
+def process_any(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: str = "") -> None:
+    k = kind(url)
+    if k == "instagram":
+        return process(url, out, notes, browser, cookies)
+    return (process_youtube if k == "youtube" else process_web)(url, out, notes)
 
 
 def main() -> int:
@@ -302,7 +454,7 @@ def main() -> int:
     for url in urls:
         print(f"-> {url}")
         try:
-            process(url, Path(a.out), Path(a.notes), a.browser, a.cookies or "")
+            process_any(url, Path(a.out), Path(a.notes), a.browser, a.cookies or "")
         except Exception as e:  # jeden zly link nie zatrzymuje reszty
             print(f"  BLAD: {e}", file=sys.stderr)
             failed.append(url)

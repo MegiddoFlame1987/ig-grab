@@ -8,7 +8,7 @@ import argparse, html, json, os, random, re, threading, time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import ig_grab
 
@@ -32,7 +32,7 @@ LOCAL_ERRORS = ("No module named", "brak ffmpeg", "WinError 2")  # nie dotarly d
 
 def today_count(st: dict) -> int:
     """Do limitu licza sie tylko proby, ktore realnie poszly do Instagrama."""
-    return sum(1 for e in st["log"] if e["day"] == str(date.today())
+    return sum(1 for e in st["log"] if e["day"] == str(date.today()) and e.get("typ", "instagram") == "instagram"
                and not any(m in e["status"] for m in LOCAL_ERRORS))
 
 
@@ -40,8 +40,8 @@ def worker() -> None:
     while True:
         with LOCK:
             st = load()
-            ready = st["queue"] and today_count(st) < CFG["limit"]
-            url = st["queue"][0] if ready else None
+            used = today_count(st)  # limit chroni konto Instagrama; YouTube i strony nie czekaja na niego
+            url = next((u for u in st["queue"] if ig_grab.kind(u) != "instagram" or used < CFG["limit"]), None)
         if not url:
             time.sleep(3)
             continue
@@ -51,7 +51,7 @@ def worker() -> None:
             status = "juz jest"
         else:
             try:
-                (CFG["fake"] or ig_grab.process)(url, Path(CFG["out"]), Path(CFG["notes"]),
+                (CFG["fake"] or ig_grab.process_any)(url, Path(CFG["out"]), Path(CFG["notes"]),
                                                   "chrome", CFG["cookies"])
             except Exception as e:
                 status = f"blad: {str(e)[:150]}"
@@ -59,11 +59,11 @@ def worker() -> None:
             st = load()
             st["queue"] = [u for u in st["queue"] if u != url]
             if status != "juz jest":  # tylko realne zapytania do IG liczą się do limitu
-                st["log"].append({"day": str(date.today()), "url": url, "status": status,
+                st["log"].append({"day": str(date.today()), "url": url, "status": status, "typ": ig_grab.kind(url),
                                   "ts": time.strftime("%H:%M:%S")})
             save(st)
         if status != "juz jest":
-            time.sleep(random.uniform(*CFG["pause"]))
+            time.sleep(random.uniform(*CFG["pause"]) if ig_grab.kind(url) == "instagram" else 2)
 
 
 def read_notes() -> list:
@@ -74,7 +74,19 @@ def read_notes() -> list:
         t = f.read_text(encoding="utf-8")
         meta = dict(re.findall(r"^(\w+): (.*)$", t.split("---")[1], re.M)) if t.startswith("---") else {}
         title = re.search(r"^# (.+)$", t, re.M)
-        out.append({"id": f.stem, "tag": meta.get("kategoria") or meta.get("etykieta", ""),
+        d = Path(CFG["out"]) / f.stem
+        photos = [f"/media/{quote(f.stem)}/{x.name}" for x in sorted(d.glob("photo_*.jpg"))]
+        media = {"photos": photos}
+        if (d / "media.mp4").exists():
+            media["video"] = f"/media/{quote(f.stem)}/media.mp4"
+        if (d / "media.jpg").exists():
+            media["thumb"] = f"/media/{quote(f.stem)}/media.jpg"
+        elif photos:
+            media["thumb"] = photos[0]
+        if f.stem.startswith("yt-"):
+            media["yt"] = f.stem[3:]
+        out.append({"typ": meta.get("typ", "instagram" if (d / "media.info.json").exists() else ""),
+                    "sha": meta.get("sha256", ""), "media": media, "id": f.stem, "tag": meta.get("kategoria") or meta.get("etykieta", ""),
                     "ocena": meta.get("ocena", ""), "data": meta.get("data_posta", ""),
                     "tagi": [t.strip() for t in meta.get("tagi", "").split(",") if t.strip()],
                     "tytul": title.group(1) if title else f.stem,
@@ -101,7 +113,8 @@ button{cursor:pointer;background:var(--acc);color:#fff;border:0}button:hover{opa
 .chip{padding:2px 10px;border-radius:99px;background:var(--bg);border:1px solid var(--line);cursor:pointer;font-size:13px;color:var(--mut)}
 .chip.on{background:var(--accbg);color:var(--acc);border-color:var(--acc)}
 #list{overflow:auto;flex:1}
-.item{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+.item{padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer;display:flex;gap:10px;align-items:center}
+.item img{width:46px;height:62px;object-fit:cover;border-radius:6px;flex:none;background:var(--line)}.it{min-width:0;flex:1}
 .item:hover{background:var(--bg)}.item.on{background:var(--accbg)}
 .item b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .item small{color:var(--mut)}
@@ -136,7 +149,7 @@ details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px
   <input id=ntg placeholder="tagi po przecinku (puste = Claude nada)" style="margin-top:6px">
   <select id=ntc style="margin:6px 0;width:100%;padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)"><option value="">kategoria: auto</option><option>ai</option><option>trading</option><option>przepis</option><option>biznes</option><option>dziennik</option><option>inne</option></select>
   <button onclick=newNote()>Zapisz notatkę</button> <small id=ntst style="color:var(--mut)"></small></details>
- <details><summary>Dodaj linki do kolejki</summary>
+ <details><summary>Dodaj linki (Instagram, YouTube, strony, PDF)</summary>
   <textarea id=urls placeholder="wklej linki, jeden pod drugim"></textarea>
   <button onclick=add()>Dodaj do kolejki</button>
   <div id=queue></div></details>
@@ -173,7 +186,7 @@ function render(){
  const cats=[...new Set(S.notes.map(n=>n.tag).filter(Boolean))].sort();
  $("chips").innerHTML=cats.map(t=>`<span class="chip ${t==tag?"on":""}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join("");
  const shown=S.notes.filter(n=>(!tag||n.tag==tag)&&n.text.toLowerCase().includes(q));
- $("list").innerHTML=shown.map(n=>`<div class="item ${n.id==sel?"on":""}" onclick="pick('${esc(n.id)}')"><b>${esc(n.tytul.slice(0,80))}</b><small>${esc([n.tag,n.ocena,n.autor].filter(Boolean).join(" · "))}</small></div>`).join("")||'<p class=empty style="margin:20px">Brak notatek.</p>';
+ $("list").innerHTML=shown.map(n=>`<div class="item ${n.id==sel?"on":""}" onclick="pick('${esc(n.id)}')">${n.media.thumb?`<img src="${n.media.thumb}" loading=lazy alt="">`:""}<div class=it><b>${esc(n.tytul.slice(0,80))}</b><small>${esc([n.typ,n.tag,n.ocena,n.autor].filter(Boolean).join(" · "))}</small></div></div>`).join("")||'<p class=empty style="margin:20px">Brak notatek.</p>';
  $("quota").textContent=`dziś ${S.used}/${S.limit} · kolejka ${S.queue.length}`;
  $("queue").innerHTML="<ul>"+S.queue.map(u=>"<li>"+esc(u)+"</li>").join("")+"</ul><ul>"+S.log.slice(-6).reverse().map(x=>"<li>"+esc(x.ts+" "+x.status)+"</li>").join("")+"</ul>";
 }
@@ -182,9 +195,13 @@ function searchTag(t){$("q").value=t;setView("note");render()}
 function pick(id){sel=id;setView("note",true);const n=S.notes.find(x=>x.id==id);if(!n)return;
  const rel=S.notes.filter(x=>x.id!=id).map(x=>({n:x,sh:x.tagi.filter(t=>n.tagi.includes(t))})).filter(r=>r.sh.length).sort((a,b)=>b.sh.length-a.sh.length).slice(0,8);
  $("note").innerHTML=
-  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><span>${esc(n.ocena)}</span><span>${esc(n.data)}</span>${/^https?:/.test(n.url)?`<a href="${esc(n.url)}" target=_blank>oryginał ↗</a>`:""}</div>`+md(body(n))+
+  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><span>${esc(n.ocena)}</span><span>${esc(n.data)}</span><span>${esc(n.typ)}</span>${/^https?:/.test(n.url)?`<a href="${esc(n.url)}" target=_blank>źródło ↗</a>`:""}${n.sha?`<span title="SHA-256 treści źródłowej: ${esc(n.sha)}" style="font-family:monospace">sha ${esc(n.sha.slice(0,8))}</span>`:""}</div>`+md(body(n))+
   `<h2>Moje</h2><textarea id=my style="height:110px" placeholder="twoja notatka: co z tym zrobić, gdzie wykorzystać">${esc(moje(n))}</textarea><button onclick="saveMy('${esc(n.id)}')">Zapisz</button> <small id=saved style="color:var(--mut)"></small>`;
- $("rail").innerHTML=`<h3>Tagi</h3><div class=chips style="margin:0">${n.tagi.map(t=>`<span class=chip onclick="searchTag('${esc(t)}')">${esc(t)}</span>`).join("")||"<small>brak</small>"}</div>`+
+ let mh="";
+ if(n.media.video)mh=`<video controls preload=metadata playsinline ${n.media.thumb?`poster="${n.media.thumb}"`:""} src="${n.media.video}" style="width:100%;max-height:78vh;border-radius:12px;background:#000"></video>`;
+ else if(n.media.yt)mh=`<div style="position:relative;padding-top:56.25%"><iframe src="https://www.youtube-nocookie.com/embed/${esc(n.media.yt)}" allowfullscreen loading=lazy style="position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:12px"></iframe></div>`;
+ else if(n.media.photos.length)mh=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">${n.media.photos.map(p=>`<a href="${p}" target=_blank><img src="${p}" loading=lazy style="width:100%;border-radius:8px"></a>`).join("")}</div>`;
+ $("rail").innerHTML=(mh?`<h3>Podgląd</h3>${mh}`:"")+`<h3>Tagi</h3><div class=chips style="margin:0">${n.tagi.map(t=>`<span class=chip onclick="searchTag('${esc(t)}')">${esc(t)}</span>`).join("")||"<small>brak</small>"}</div>`+
   `<h3>Powiązane (wspólne tagi)</h3>`+(rel.map(r=>`<a class=rel href=# onclick="pick('${esc(r.n.id)}');return false">${esc(r.n.tytul)}<small>${esc(r.sh.join(", "))}</small></a>`).join("")||"<small>brak powiązań</small>");
  render();$("main").scrollTop=0}
 async function load(){try{S=await (await fetch("/api/state")).json();render();
@@ -301,6 +318,48 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def serve_media(self, path: str) -> None:
+        parts = unquote(path).split("/")  # ['', 'media', id, plik]
+        if len(parts) != 4 or not re.fullmatch(r"[\w-]+", parts[2]) \
+                or not re.fullmatch(r"media\.mp4|media\.jpg|photo_\d+\.jpg", parts[3]):
+            return self.send("nie ma", 404)
+        f = Path(CFG["out"]) / parts[2] / parts[3]
+        if not f.is_file():
+            return self.send("nie ma", 404)
+        size, start, end, code = f.stat().st_size, 0, f.stat().st_size - 1, 200
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range", ""))
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:  # ostatnie N bajtow
+                start = max(size - int(m.group(2)), 0)
+            code = 206
+            if start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+        self.send_response(code)
+        self.send_header("Content-Type", "video/mp4" if f.suffix == ".mp4" else "image/jpeg")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = fh.read(min(65536, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def send_json(self, data) -> None:
         b = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
@@ -312,9 +371,11 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if u.path.startswith("/media/"):
+            return self.serve_media(u.path)
         if u.path == "/api/state":
             st = load()
-            data = {"notes": [{k: n[k] for k in ("id", "tag", "ocena", "data", "tagi", "tytul", "autor", "url", "text")} for n in read_notes()],
+            data = {"notes": [{k: n[k] for k in ("id", "tag", "ocena", "data", "tagi", "tytul", "autor", "url", "text", "typ", "sha", "media")} for n in read_notes()],
                     "queue": st["queue"], "log": st["log"], "used": today_count(st), "limit": CFG["limit"],
                     "key": bool(os.environ.get("ANTHROPIC_API_KEY"))}
             b = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -342,7 +403,7 @@ class H(BaseHTTPRequestHandler):
             st = load()
             for u in urls:
                 have = (Path(CFG["notes"]) / f"{ig_grab.shortcode(u)}.md").exists()
-                if "instagram.com/" in u and u not in st["queue"] and not have:
+                if re.match(r"https?://", u) and u not in st["queue"] and not have:
                     st["queue"].append(u)
             save(st)
         self.send_response(303)
