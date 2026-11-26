@@ -45,3 +45,11 @@ Do kolejki (strona) lub w wierszu polecen mozna podac: Instagram, YouTube (napis
 dowolna strone WWW (trafilatura) i link do PDF-a. Kazda notatka ma `typ`, `url` i `sha256` tresci zrodlowej (plik `source.txt`
 w `ig_out/<id>/`). Limit dzienny dotyczy tylko Instagrama. Adresy lokalne i prywatne sa odrzucane.
 SHA-256 to odcisk (dowod, ze tresc sie nie zmienila), nie szyfrowanie i nie dowod prawdziwosci.
+
+## Docker (serwer)
+    mkdir data && sudo chown 1000 data          # wolumen zapisywalny dla uzytkownika w kontenerze
+    echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env   # nie do gita
+    cp cookies.txt data/cookies.txt              # opcjonalnie, dla Instagrama
+    docker compose up -d --build
+    tailscale serve --bg 8765                    # dostep z telefonu i laptopa tylko przez Tailscale
+Strona slucha tylko na 127.0.0.1 hosta. Nie uzywaj `tailscale funnel` (wystawia usluge publicznie).

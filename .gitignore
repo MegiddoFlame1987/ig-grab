@@ -3,3 +3,5 @@ cookies.txt
 __pycache__/
 notes/
 ig_state.json
+.env
+data/

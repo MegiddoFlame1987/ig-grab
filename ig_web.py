@@ -420,16 +420,17 @@ def main() -> None:
     ap.add_argument("--out", default="ig_out")
     ap.add_argument("--notes", default="notes")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default="127.0.0.1", help="adres nasluchu; w Dockerze 0.0.0.0 (port publikuj tylko na 127.0.0.1 hosta)")
     ap.add_argument("--fake", action="store_true", help="test bez Instagrama")
     a = ap.parse_args()
     CFG.update(cookies=a.cookies, limit=a.limit, pause=a.pause, out=a.out, notes=a.notes,
                fake=_fake if a.fake else None)
     ig_grab.refresh_index(Path(a.notes))
     threading.Thread(target=worker, daemon=True).start()
-    print(f"http://127.0.0.1:{a.port}  (limit {a.limit}/dzien)")
+    print(f"http://{a.host}:{a.port}  (limit {a.limit}/dzien)")
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("UWAGA: brak ANTHROPIC_API_KEY w tym oknie - notatki beda bez tytulu, kategorii i tekstu ze slajdow.")
-    ThreadingHTTPServer(("127.0.0.1", a.port), H).serve_forever()
+    ThreadingHTTPServer((a.host, a.port), H).serve_forever()
 
 
 def _fake(url, out, notes, browser, cookies):

@@ -1,0 +1,9 @@
+services:
+  brain:
+    build: .
+    restart: unless-stopped            # wstaje sam po restarcie serwera
+    ports:
+      - "127.0.0.1:8765:8765"          # tylko lokalnie na hoscie; z innych urzadzen przez: tailscale serve --bg 8765
+    env_file: .env                     # ANTHROPIC_API_KEY=sk-ant-...  (plik .env NIE do gita)
+    volumes:
+      - ./data:/data                   # notes/, ig_out/, cookies.txt, model Whisper
