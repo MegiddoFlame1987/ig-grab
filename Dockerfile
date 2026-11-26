@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir yt-dlp faster-whisper anthropic "av<17" trafilatura pypdf
+RUN pip install --no-cache-dir yt-dlp faster-whisper anthropic "av<17" trafilatura pypdf pillow
 
 WORKDIR /app
 COPY ig_grab.py ig_web.py ./

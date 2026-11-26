@@ -2,7 +2,7 @@
 """ig_grab: link (Instagram, YouTube, strona WWW, PDF) -> folder ze zrodlem + notatka (tytul, kategoria, tagi, odcisk SHA-256).
 
 Setup (raz):
-    pip install yt-dlp faster-whisper anthropic "av<17" trafilatura pypdf   # av 17+ psuje faster-whisper
+    pip install yt-dlp faster-whisper anthropic "av<17" trafilatura pypdf pillow   # av 17+ psuje faster-whisper
     brew install ffmpeg   # lub apt install ffmpeg
 Uzycie:
     python ig_grab.py --browser chrome URL [URL ...]   # lub --cookies cookies.txt
@@ -19,6 +19,8 @@ ALLOW_PRIVATE = False  # tylko dla testow: pozwala pobierac z localhost
 
 
 def kind(url: str) -> str:
+    if url.startswith("file:"):
+        return "plik"
     h = (urlparse(url if "//" in url else "https://" + url).hostname or "").lower()
     if h.endswith("instagram.com"):
         return "instagram"
@@ -29,6 +31,8 @@ def kind(url: str) -> str:
 
 def shortcode(url: str) -> str:
     k = kind(url)
+    if k == "plik":  # "file:<sha256>.<ext>"
+        return "img-" + url[5:17]
     if k == "youtube":
         u = urlparse(url)
         vid = (parse_qs(u.query).get("v") or [u.path.rstrip("/").split("/")[-1]])[0]
@@ -182,14 +186,17 @@ def known_tags(notes: Path, top: int = 40) -> list:
     return [t for t, _ in sorted(cnt.items(), key=lambda x: -x[1])[:top]]
 
 
-def analyze(source: str, known: list = (), manual: bool = False) -> dict:
-    """Jedno wywolanie: tytul, streszczenie, kategoria (lista zamknieta), ocena."""
+def analyze_content(blocks: list, known: list = (), manual: bool = False, image: bool = False) -> dict:
+    """Jedno wywolanie: tytul, streszczenie, kategoria (lista zamknieta), ocena, tagi. Dla obrazu dodatkowo tekst i zrodlo."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return {}
     cats = CATEGORIES if manual else tuple(c for c in CATEGORIES if c != "dziennik")
-    raw = _claude(
-        "Przeczytaj tresc posta z Instagrama i zwroc WYLACZNIE obiekt JSON z polami:\n"
-        '"tytul": konkretny tytul po polsku, max 70 znakow,\n'
+    prompt = {"type": "text", "text": (
+        ("Przeczytaj ten zrzut ekranu (np. post z social media, artykul, czat, notatka)" if image
+         else "Przeczytaj tresc posta z Instagrama") + " i zwroc WYLACZNIE obiekt JSON z polami:\n"
+        + ('"tekst": doslowny zapis calego tekstu widocznego na obrazie, w kolejnosci czytania, bez komentarzy,\n'
+           '"zrodlo": autor, konto lub serwis widoczny na zrzucie (pusty napis, gdy nie widac),\n' if image else "")
+        + '"tytul": konkretny tytul po polsku, max 70 znakow,\n'
         '"streszczenie": 2 zdania po polsku - co konkretnie z tego wynika (bez lania wody),\n'
         f'"kategoria": dokladnie jedna z {list(cats)},\n'
         f'"ocena": dokladnie jedna z {list(RATINGS)}. Wybierz "reklama poradnika", gdy prawdziwa '
@@ -198,18 +205,29 @@ def analyze(source: str, known: list = (), manual: bool = False) -> dict:
         'a niczego nie uzasadnia.\n'
         '"tagi": lista 3-5 krotkich tagow tematycznych po polsku (male litery, 1-2 slowa, np. "claude code", '
         '"prompty", "marketing"). ' + (f"Uzywaj istniejacych tagow, gdy pasuja: {list(known)}. " if known else "")
-        + 'Nowy tag tylko gdy zaden istniejacy nie pasuje.\n\n'
-        "TRESC:\n" + source[:12000], 1500)
-    m = re.search(r"\{.*\}", raw, re.S)
-    try:
-        d = json.loads(m.group(0)) if m else {}
-    except ValueError:
+        + "Nowy tag tylko gdy zaden istniejacy nie pasuje.\n")}
+    content = [*blocks, prompt] if image else [prompt, *blocks]
+    d = None
+    for _ in range(2):  # dlugi tekst bywa zle ucieczkowany w JSON - jedna ponowna proba
+        raw = _claude(content, 4000 if image else 1500)
+        m = re.search(r"\{.*\}", raw, re.S)
+        try:
+            d = json.loads(m.group(0)) if m else None
+        except ValueError:
+            d = None
+        if isinstance(d, dict):
+            break
+    if not isinstance(d, dict):
         return {}
     tags = d.get("tagi") if isinstance(d.get("tagi"), list) else []
     d["tagi"] = list(dict.fromkeys(t.strip().lower() for t in tags if isinstance(t, str) and t.strip()))[:5]
     d["kategoria"] = d.get("kategoria") if d.get("kategoria") in cats else "inne"
     d["ocena"] = d.get("ocena") if d.get("ocena") in RATINGS else "czesciowo"
     return d
+
+
+def analyze(source: str, known: list = (), manual: bool = False) -> dict:
+    return analyze_content([{"type": "text", "text": "TRESC:\n" + source[:12000]}], known, manual)
 
 
 def note_text(fm: dict, an: dict, code: str, sections: list, moje: str = "") -> str:
@@ -224,12 +242,12 @@ def note_text(fm: dict, an: dict, code: str, sections: list, moje: str = "") -> 
 
 def write_note(notes: Path, code: str, url: str, info: dict, an: dict,
                caption: str, transcript: str, slides: str, recipe_md: str,
-               typ: str = "instagram", sha: str = "", extra: tuple = ()) -> None:
+               typ: str = "instagram", sha: str = "", extra: tuple = (), sha_raw: str = "") -> None:
     notes.mkdir(parents=True, exist_ok=True)
     d = info.get("upload_date") or ""
     fm = {"url": url, "autor": info.get("uploader") or info.get("channel") or "",
           "kategoria": an.get("kategoria", ""), "ocena": an.get("ocena", ""),
-          "tagi": ", ".join(an.get("tagi", [])), "typ": typ, "sha256": sha,
+          "tagi": ", ".join(an.get("tagi", [])), "typ": typ, "sha256": sha, "sha256_pliku": sha_raw, "plik": info.get("plik", ""),
           "data_posta": f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else "",
           "pobrano": str(date.today())}
     sections = [f"## {t}\n\n{b.strip()}\n" for t, b in
@@ -420,12 +438,59 @@ def process_web(url: str, out: Path, notes: Path) -> None:
     an.setdefault("tytul", title)
     body = text if len(text) <= 60000 else text[:60000] + "\n\n[obcieto]"
     write_note(notes, dest.name, url, {"uploader": site, "upload_date": meta_date}, an, "", "", "", "",
-               typ="web", sha=sha, extra=(("Tresc", body),))
+               typ="web", sha=sha, extra=(("Tresc", body),), sha_raw=hashlib.sha256(raw).hexdigest())
+    refresh_index(notes)
+
+
+UPLOADS = Path("uploads")  # tu laduja wgrane zrzuty (nazwa = sha256 + rozszerzenie)
+MEDIA = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+
+
+def process_image(name: str, out: Path, notes: Path) -> None:
+    """Zrzut ekranu: oryginal + odcisk SHA-256 pliku; Claude czyta tekst z obrazu i od razu analizuje (jedno wywolanie)."""
+    if not re.fullmatch(r"[0-9a-f]{64}\.(png|jpg|webp)", name):
+        raise RuntimeError("zla nazwa pliku")
+    src = UPLOADS / name
+    raw = src.read_bytes()
+    sha_raw, ext = hashlib.sha256(raw).hexdigest(), name.rsplit(".", 1)[1]
+    code = "img-" + sha_raw[:12]
+    dest = out / code
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy(src, dest / f"image.{ext}")
+    api_bytes, api_type = raw, MEDIA[ext]
+    try:  # Pillow (opcjonalnie): miniatura na liste i mniejszy obraz do API (taniej)
+        from PIL import Image
+        im = Image.open(src).convert("RGB")
+        th = im.copy()
+        th.thumbnail((360, 480))
+        th.save(dest / "media.jpg", quality=80)
+        if max(im.size) > 1600:
+            im.thumbnail((1600, 1600))
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=85)
+            api_bytes, api_type = buf.getvalue(), "image/jpeg"
+    except ImportError:
+        pass
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError("brak ANTHROPIC_API_KEY - zrzut wymaga Claude'a do odczytu tekstu")
+    block = {"type": "image", "source": {"type": "base64", "media_type": api_type,
+                                         "data": base64.b64encode(api_bytes).decode()}}
+    an = analyze_content([block], known_tags(notes), image=True, manual=False)
+    if not an:
+        raise RuntimeError("Claude nie zwrocil poprawnej odpowiedzi dla tego zrzutu")
+    text = str(an.get("tekst") or "")
+    sha = write_source(dest, text)
+    name_file = UPLOADS / f"{name.rsplit('.', 1)[0]}.name"
+    orig = name_file.read_text(encoding="utf-8").strip() if name_file.exists() else ""
+    write_note(notes, code, "", {"uploader": str(an.get("zrodlo") or ""), "plik": orig}, an, "", "", "", "",
+               typ="zrzut", sha=sha, extra=(("Tekst ze zrzutu", text),), sha_raw=sha_raw)
     refresh_index(notes)
 
 
 def process_any(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: str = "") -> None:
     k = kind(url)
+    if k == "plik":
+        return process_image(url[5:], out, notes)
     if k == "instagram":
         return process(url, out, notes, browser, cookies)
     return (process_youtube if k == "youtube" else process_web)(url, out, notes)

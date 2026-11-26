@@ -4,7 +4,7 @@
 Uruchom:  python ig_web.py --cookies cookies.txt     (potem http://127.0.0.1:8765)
 Dziala tylko na 127.0.0.1. Limit dzienny i losowe przerwy chronia konto przed blokada.
 """
-import argparse, html, json, os, random, re, threading, time
+import argparse, hashlib, html, json, os, random, re, threading, time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +25,9 @@ def load() -> dict:
 
 def save(st: dict) -> None:
     STATE_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+FATAL_API = ("credit balance", "invalid x-api-key", "authentication_error", "permission_error")  # nie gubimy zadan, czekamy
 
 
 LOCAL_ERRORS = ("No module named", "brak ffmpeg", "WinError 2")  # nie dotarly do Instagrama
@@ -54,7 +57,13 @@ def worker() -> None:
                 (CFG["fake"] or ig_grab.process_any)(url, Path(CFG["out"]), Path(CFG["notes"]),
                                                   "chrome", CFG["cookies"])
             except Exception as e:
+                if any(m in str(e).lower() for m in FATAL_API):
+                    CFG["pauza"] = "brak srodkow na koncie API Anthropic lub zly klucz - zadania czekaja w kolejce"
+                    time.sleep(30)
+                    continue  # zadanie zostaje w kolejce; proba ponowi sie sama
                 status = f"blad: {str(e)[:150]}"
+            else:
+                CFG["pauza"] = ""
         with LOCK:
             st = load()
             st["queue"] = [u for u in st["queue"] if u != url]
@@ -63,7 +72,7 @@ def worker() -> None:
                                   "ts": time.strftime("%H:%M:%S")})
             save(st)
         if status != "juz jest":
-            time.sleep(random.uniform(*CFG["pause"]) if ig_grab.kind(url) == "instagram" else 2)
+            time.sleep(random.uniform(*CFG["pause"]) if ig_grab.kind(url) == "instagram" else 0.5)
 
 
 def read_notes() -> list:
@@ -77,6 +86,9 @@ def read_notes() -> list:
         d = Path(CFG["out"]) / f.stem
         photos = [f"/media/{quote(f.stem)}/{x.name}" for x in sorted(d.glob("photo_*.jpg"))]
         media = {"photos": photos}
+        img = next(iter(sorted(d.glob("image.*"))), None)
+        if img:
+            media["photos"] = [f"/media/{quote(f.stem)}/{img.name}"]
         if (d / "media.mp4").exists():
             media["video"] = f"/media/{quote(f.stem)}/media.mp4"
         if (d / "media.jpg").exists():
@@ -86,7 +98,8 @@ def read_notes() -> list:
         if f.stem.startswith("yt-"):
             media["yt"] = f.stem[3:]
         out.append({"typ": meta.get("typ", "instagram" if (d / "media.info.json").exists() else ""),
-                    "sha": meta.get("sha256", ""), "media": media, "id": f.stem, "tag": meta.get("kategoria") or meta.get("etykieta", ""),
+                    "sha": meta.get("sha256", ""), "sha_raw": meta.get("sha256_pliku", ""), "plik": meta.get("plik", ""),
+                    "media": media, "id": f.stem, "tag": meta.get("kategoria") or meta.get("etykieta", ""),
                     "ocena": meta.get("ocena", ""), "data": meta.get("data_posta", ""),
                     "tagi": [t.strip() for t in meta.get("tagi", "").split(",") if t.strip()],
                     "tytul": title.group(1) if title else f.stem,
@@ -140,7 +153,7 @@ details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px
 @media(max-width:760px){body{flex-direction:column;height:auto}#side{width:100%}#noteView{padding:16px}}
 </style>
 <aside id=side><header>
- <div id=nokey hidden style="background:#fee2e2;color:#991b1b;padding:8px 10px;border-radius:8px;margin-bottom:10px;font-size:13px">Brak ANTHROPIC_API_KEY w oknie, w którym działa strona. Nowe posty zapiszą się <b>bez tytułu, kategorii i tekstu ze slajdów</b>. Ustaw klucz i zrestartuj stronę.</div>
+ <div id=nokey hidden style="background:#fee2e2;color:#991b1b;padding:8px 10px;border-radius:8px;margin-bottom:10px;font-size:13px"></div>
  <h1>ig-grab <small id=quota style="font-weight:400;color:var(--mut)"></small></h1>
  <div class=seg><button id=bNote class=on onclick="setView('note')">Notatka</button><button id=bMap onclick="setView('map')">Mapa</button></div>
  <details><summary>Nowa notatka (wklej tekst)</summary>
@@ -149,6 +162,9 @@ details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px
   <input id=ntg placeholder="tagi po przecinku (puste = Claude nada)" style="margin-top:6px">
   <select id=ntc style="margin:6px 0;width:100%;padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)"><option value="">kategoria: auto</option><option>ai</option><option>trading</option><option>przepis</option><option>biznes</option><option>dziennik</option><option>inne</option></select>
   <button onclick=newNote()>Zapisz notatkę</button> <small id=ntst style="color:var(--mut)"></small></details>
+ <details><summary>Wgraj zrzuty ekranu</summary>
+  <input id=files type=file multiple accept="image/png,image/jpeg,image/webp" style="padding:6px">
+  <button onclick="upl($('files').files)" style="margin-top:6px">Wgraj</button> <small id=upst style="color:var(--mut)"></small></details>
  <details><summary>Dodaj linki (Instagram, YouTube, strony, PDF)</summary>
   <textarea id=urls placeholder="wklej linki, jeden pod drugim"></textarea>
   <button onclick=add()>Dodaj do kolejki</button>
@@ -181,21 +197,22 @@ async function saveMy(id){const t=$("my");
  await fetch("/api/my",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,text:t.value})});
  $("saved").textContent="zapisano";await load();sel=id}
 function render(){
- $("nokey").hidden=S.key!==false;
+ const warn=S.pauza?"Przetwarzanie wstrzymane: brak środków na koncie API Anthropic lub zły klucz. Zadania czekają w kolejce i ruszą same po uzupełnieniu.":(S.key===false?"Brak ANTHROPIC_API_KEY w oknie, w którym działa strona. Nowe posty zapiszą się <b>bez tytułu, kategorii i tekstu ze slajdów</b>. Ustaw klucz i zrestartuj stronę.":"");
+ $("nokey").hidden=!warn;$("nokey").innerHTML=warn;
  const q=$("q").value.toLowerCase();
  const cats=[...new Set(S.notes.map(n=>n.tag).filter(Boolean))].sort();
  $("chips").innerHTML=cats.map(t=>`<span class="chip ${t==tag?"on":""}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join("");
  const shown=S.notes.filter(n=>(!tag||n.tag==tag)&&n.text.toLowerCase().includes(q));
  $("list").innerHTML=shown.map(n=>`<div class="item ${n.id==sel?"on":""}" onclick="pick('${esc(n.id)}')">${n.media.thumb?`<img src="${n.media.thumb}" loading=lazy alt="">`:""}<div class=it><b>${esc(n.tytul.slice(0,80))}</b><small>${esc([n.typ,n.tag,n.ocena,n.autor].filter(Boolean).join(" · "))}</small></div></div>`).join("")||'<p class=empty style="margin:20px">Brak notatek.</p>';
  $("quota").textContent=`dziś ${S.used}/${S.limit} · kolejka ${S.queue.length}`;
- $("queue").innerHTML="<ul>"+S.queue.map(u=>"<li>"+esc(u)+"</li>").join("")+"</ul><ul>"+S.log.slice(-6).reverse().map(x=>"<li>"+esc(x.ts+" "+x.status)+"</li>").join("")+"</ul>";
+ $("queue").innerHTML="<ul>"+S.queue.slice(0,6).map(u=>"<li>"+esc(u.startsWith("file:")?"zrzut ekranu":u)+"</li>").join("")+(S.queue.length>6?`<li>… i ${S.queue.length-6} więcej</li>`:"")+"</ul><ul>"+S.log.slice(-6).reverse().map(x=>"<li>"+esc(x.ts+" "+x.status)+"</li>").join("")+"</ul>";
 }
 function setTag(t){tag=tag==t?"":t;render()}
 function searchTag(t){$("q").value=t;setView("note");render()}
 function pick(id){sel=id;setView("note",true);const n=S.notes.find(x=>x.id==id);if(!n)return;
  const rel=S.notes.filter(x=>x.id!=id).map(x=>({n:x,sh:x.tagi.filter(t=>n.tagi.includes(t))})).filter(r=>r.sh.length).sort((a,b)=>b.sh.length-a.sh.length).slice(0,8);
  $("note").innerHTML=
-  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><span>${esc(n.ocena)}</span><span>${esc(n.data)}</span><span>${esc(n.typ)}</span>${/^https?:/.test(n.url)?`<a href="${esc(n.url)}" target=_blank>źródło ↗</a>`:""}${n.sha?`<span title="SHA-256 treści źródłowej: ${esc(n.sha)}" style="font-family:monospace">sha ${esc(n.sha.slice(0,8))}</span>`:""}</div>`+md(body(n))+
+  `<div class=meta><span class="chip on" onclick="setTag('${esc(n.tag)}')">${esc(n.tag)}</span><span>${esc(n.autor)}</span><span>${esc(n.ocena)}</span><span>${esc(n.data)}</span><span>${esc(n.typ)}</span>${/^https?:/.test(n.url)?`<a href="${esc(n.url)}" target=_blank>źródło ↗</a>`:(n.plik?`<span>plik: ${esc(n.plik.slice(0,40))}</span>`:"")}${n.sha?`<span title="SHA-256 treści źródłowej: ${esc(n.sha)}${n.sha_raw?` | SHA-256 pliku: ${esc(n.sha_raw)}`:""}" style="font-family:monospace">sha ${esc(n.sha.slice(0,8))}</span>`:""}</div>`+md(body(n))+
   `<h2>Moje</h2><textarea id=my style="height:110px" placeholder="twoja notatka: co z tym zrobić, gdzie wykorzystać">${esc(moje(n))}</textarea><button onclick="saveMy('${esc(n.id)}')">Zapisz</button> <small id=saved style="color:var(--mut)"></small>`;
  let mh="";
  if(n.media.video)mh=`<video controls preload=metadata playsinline ${n.media.thumb?`poster="${n.media.thumb}"`:""} src="${n.media.video}" style="width:100%;max-height:78vh;border-radius:12px;background:#000"></video>`;
@@ -209,6 +226,11 @@ async function load(){try{S=await (await fetch("/api/state")).json();render();
 async function newNote(){const t=$("nt").value.trim();if(!t)return;$("ntst").textContent="zapisuję…";
  const r=await (await fetch("/api/new",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:t,title:$("nti").value,tagi:$("ntg").value,kategoria:$("ntc").value})})).json();
  $("nt").value=$("nti").value=$("ntg").value="";$("ntc").value="";$("ntst").textContent="zapisano";await load();if(r.id)pick(r.id)}
+async function upl(files){const st=$("upst");let ok=0,dup=0,fail=0;
+ for(let i=0;i<files.length;i++){st.textContent=`wysyłam ${i+1}/${files.length}…`;
+  try{const j=await (await fetch("/api/upload?name="+encodeURIComponent(files[i].name),{method:"POST",body:files[i]})).json();
+   if(j.status=="ok")ok++;else if(j.status=="juz jest")dup++;else fail++}catch(e){fail++}}
+ st.textContent=`wysłano ${ok}, duplikaty ${dup}, błędy ${fail}. Przetwarzanie leci w tle.`;$("files").value="";load()}
 async function add(){const t=$("urls");
  await fetch("/add",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"urls="+encodeURIComponent(t.value)});t.value="";load()}
 
@@ -278,6 +300,37 @@ load();setInterval(load,10000);
 </script></html>"""
 
 
+MAX_UPLOAD = 25_000_000
+
+
+def upload_image(h, n: int, name: str) -> str:
+    """Przyjmuje jeden zrzut (surowe bajty w tresci zadania). Typ po bajtach, nazwa = SHA-256, duplikaty pomijane."""
+    if n <= 0 or n > MAX_UPLOAD:
+        h.rfile.read(min(n, MAX_UPLOAD))
+        return "za duzy lub pusty"
+    raw = h.rfile.read(n)
+    ext = ("png" if raw[:8] == b"\x89PNG\r\n\x1a\n" else "jpg" if raw[:3] == b"\xff\xd8\xff"
+           else "webp" if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP" else "")
+    if not ext:
+        return "zly typ (PNG, JPEG lub WEBP)"
+    sha = hashlib.sha256(raw).hexdigest()
+    if (Path(CFG["notes"]) / f"img-{sha[:12]}.md").exists():
+        return "juz jest"
+    up = Path(CFG["uploads"])
+    up.mkdir(parents=True, exist_ok=True)
+    if (up / f"{sha}.{ext}").exists() and f"file:{sha}.{ext}" in load()["queue"]:
+        return "juz jest"  # ten sam zrzut czeka juz w kolejce
+    (up / f"{sha}.{ext}").write_bytes(raw)
+    (up / f"{sha}.name").write_text(re.sub(r"[\r\n]+", " ", unquote(name))[:200], encoding="utf-8")
+    job = f"file:{sha}.{ext}"
+    with LOCK:
+        st = load()
+        if job not in st["queue"]:
+            st["queue"].append(job)
+            save(st)
+    return "ok"
+
+
 def create_note(d: dict) -> str:
     """Reczna notatka (np. dziennik, tweet). Puste pola uzupelnia Claude, jesli jest klucz API."""
     text = str(d.get("text", "")).strip()
@@ -321,7 +374,7 @@ class H(BaseHTTPRequestHandler):
     def serve_media(self, path: str) -> None:
         parts = unquote(path).split("/")  # ['', 'media', id, plik]
         if len(parts) != 4 or not re.fullmatch(r"[\w-]+", parts[2]) \
-                or not re.fullmatch(r"media\.mp4|media\.jpg|photo_\d+\.jpg", parts[3]):
+                or not re.fullmatch(r"media\.mp4|media\.jpg|photo_\d+\.jpg|image\.(?:png|jpg|webp)", parts[3]):
             return self.send("nie ma", 404)
         f = Path(CFG["out"]) / parts[2] / parts[3]
         if not f.is_file():
@@ -341,7 +394,7 @@ class H(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
         self.send_response(code)
-        self.send_header("Content-Type", "video/mp4" if f.suffix == ".mp4" else "image/jpeg")
+        self.send_header("Content-Type", {".mp4": "video/mp4", ".png": "image/png", ".webp": "image/webp"}.get(f.suffix, "image/jpeg"))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(end - start + 1))
         if code == 206:
@@ -375,9 +428,9 @@ class H(BaseHTTPRequestHandler):
             return self.serve_media(u.path)
         if u.path == "/api/state":
             st = load()
-            data = {"notes": [{k: n[k] for k in ("id", "tag", "ocena", "data", "tagi", "tytul", "autor", "url", "text", "typ", "sha", "media")} for n in read_notes()],
+            data = {"notes": [{k: n[k] for k in ("id", "tag", "ocena", "data", "tagi", "tytul", "autor", "url", "text", "typ", "sha", "sha_raw", "plik", "media")} for n in read_notes()],
                     "queue": st["queue"], "log": st["log"], "used": today_count(st), "limit": CFG["limit"],
-                    "key": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+                    "key": bool(os.environ.get("ANTHROPIC_API_KEY")), "pauza": CFG.get("pauza", "")}
             b = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -388,6 +441,8 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
+        if self.path.startswith("/api/upload"):
+            return self.send_json({"status": upload_image(self, n, parse_qs(urlparse(self.path).query).get("name", [""])[0])})
         if self.path == "/api/new":
             d = json.loads(self.rfile.read(n).decode("utf-8"))
             return self.send_json({"id": create_note(d)})
@@ -419,11 +474,13 @@ def main() -> None:
                     help="losowa przerwa miedzy postami (s)")
     ap.add_argument("--out", default="ig_out")
     ap.add_argument("--notes", default="notes")
+    ap.add_argument("--uploads", default="uploads", help="folder na wgrane zrzuty")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1", help="adres nasluchu; w Dockerze 0.0.0.0 (port publikuj tylko na 127.0.0.1 hosta)")
     ap.add_argument("--fake", action="store_true", help="test bez Instagrama")
     a = ap.parse_args()
-    CFG.update(cookies=a.cookies, limit=a.limit, pause=a.pause, out=a.out, notes=a.notes,
+    ig_grab.UPLOADS = Path(a.uploads)
+    CFG.update(uploads=a.uploads, cookies=a.cookies, limit=a.limit, pause=a.pause, out=a.out, notes=a.notes,
                fake=_fake if a.fake else None)
     ig_grab.refresh_index(Path(a.notes))
     threading.Thread(target=worker, daemon=True).start()

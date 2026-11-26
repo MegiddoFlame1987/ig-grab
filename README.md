@@ -5,7 +5,7 @@ Instagram URL -> folder z wideo, miniaturą, opisem, transkrypcją i przepisem. 
 ## Setup
 
 ```bash
-pip install yt-dlp faster-whisper anthropic "av<17" trafilatura pypdf   # av 17+ psuje faster-whisper
+pip install yt-dlp faster-whisper anthropic "av<17" trafilatura pypdf pillow   # av 17+ psuje faster-whisper
 ```
 
 Potrzebny też `ffmpeg` (`brew install ffmpeg` lub `apt install ffmpeg`).
@@ -53,3 +53,8 @@ SHA-256 to odcisk (dowod, ze tresc sie nie zmienila), nie szyfrowanie i nie dowo
     docker compose up -d --build
     tailscale serve --bg 8765                    # dostep z telefonu i laptopa tylko przez Tailscale
 Strona slucha tylko na 127.0.0.1 hosta. Nie uzywaj `tailscale funnel` (wystawia usluge publicznie).
+
+## Zrzuty ekranu z telefonu
+Strona: "Wgraj zrzuty ekranu" (wiele plikow naraz, PNG/JPEG/WEBP, do 25 MB kazdy). Oryginal zostaje w `uploads/` i `ig_out/`,
+nazwa pliku = SHA-256, ten sam zrzut nie wchodzi dwa razy. Claude czyta tekst z obrazu i analizuje go jednym wywolaniem.
+Gdy na koncie API skoncza sie srodki, zadania czekaja w kolejce i ruszaja same po uzupelnieniu.
