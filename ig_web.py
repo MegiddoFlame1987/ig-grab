@@ -30,6 +30,26 @@ def save(st: dict) -> None:
 FATAL_API = ("credit balance", "invalid x-api-key", "authentication_error", "permission_error")  # nie gubimy zadan, czekamy
 
 
+def api_usage() -> dict:
+    """Zuzycie API dzisiaj z usage.jsonl: liczba wywolan i tokenow, w podziale na rodzaje."""
+    tot, by = {"wywolania": 0, "in": 0, "out": 0}, {}
+    try:
+        for line in open(ig_grab.USAGE_FILE, encoding="utf-8"):
+            e = json.loads(line)
+            if e.get("day") != str(date.today()):
+                continue
+            tot["wywolania"] += 1
+            tot["in"] += e.get("in", 0)
+            tot["out"] += e.get("out", 0)
+            b = by.setdefault(e.get("label") or "inne", {"wywolania": 0, "in": 0, "out": 0})
+            b["wywolania"] += 1
+            b["in"] += e.get("in", 0)
+            b["out"] += e.get("out", 0)
+    except FileNotFoundError:
+        pass
+    return {**tot, "wg": by}
+
+
 LOCAL_ERRORS = ("No module named", "brak ffmpeg", "WinError 2")  # nie dotarly do Instagrama
 
 
@@ -155,6 +175,7 @@ details{margin-top:10px;font-size:13px}details ul{margin:6px 0;padding-left:18px
 <aside id=side><header>
  <div id=nokey hidden style="background:#fee2e2;color:#991b1b;padding:8px 10px;border-radius:8px;margin-bottom:10px;font-size:13px"></div>
  <h1>ig-grab <small id=quota style="font-weight:400;color:var(--mut)"></small></h1>
+ <div id=api style="font-size:12px;color:var(--mut);margin:-2px 0 6px;cursor:help"></div>
  <div class=seg><button id=bNote class=on onclick="setView('note')">Notatka</button><button id=bMap onclick="setView('map')">Mapa</button></div>
  <details><summary>Nowa notatka (wklej tekst)</summary>
   <textarea id=nt placeholder="wklej tekst: dziennik, tweet, pomysł..." style="height:110px"></textarea>
@@ -205,6 +226,8 @@ function render(){
  const shown=S.notes.filter(n=>(!tag||n.tag==tag)&&n.text.toLowerCase().includes(q));
  $("list").innerHTML=shown.map(n=>`<div class="item ${n.id==sel?"on":""}" onclick="pick('${esc(n.id)}')">${n.media.thumb?`<img src="${n.media.thumb}" loading=lazy alt="">`:""}<div class=it><b>${esc(n.tytul.slice(0,80))}</b><small>${esc([n.typ,n.tag,n.ocena,n.autor].filter(Boolean).join(" · "))}</small></div></div>`).join("")||'<p class=empty style="margin:20px">Brak notatek.</p>';
  $("quota").textContent=`dziś ${S.used}/${S.limit} · kolejka ${S.queue.length}`;
+ const a=S.api||{wywolania:0,in:0,out:0,wg:{}};$("api").textContent=`API dziś: ${a.wywolania} wywołań · ${Math.round(a.in/1000)}k tokenów wej. · ${Math.round(a.out/1000)}k wyj.`;
+ $("api").title=Object.entries(a.wg).map(([k,v])=>`${k}: ${v.wywolania} wywołań, ${v.in} wej., ${v.out} wyj.`).join("\n")||"brak wywołań dzisiaj";
  $("queue").innerHTML="<ul>"+S.queue.slice(0,6).map(u=>"<li>"+esc(u.startsWith("file:")?"zrzut ekranu":u)+"</li>").join("")+(S.queue.length>6?`<li>… i ${S.queue.length-6} więcej</li>`:"")+"</ul><ul>"+S.log.slice(-6).reverse().map(x=>"<li>"+esc(x.ts+" "+x.status)+"</li>").join("")+"</ul>";
 }
 function setTag(t){tag=tag==t?"":t;render()}
@@ -430,7 +453,7 @@ class H(BaseHTTPRequestHandler):
             st = load()
             data = {"notes": [{k: n[k] for k in ("id", "tag", "ocena", "data", "tagi", "tytul", "autor", "url", "text", "typ", "sha", "sha_raw", "plik", "media")} for n in read_notes()],
                     "queue": st["queue"], "log": st["log"], "used": today_count(st), "limit": CFG["limit"],
-                    "key": bool(os.environ.get("ANTHROPIC_API_KEY")), "pauza": CFG.get("pauza", "")}
+                    "key": bool(os.environ.get("ANTHROPIC_API_KEY")), "pauza": CFG.get("pauza", ""), "api": api_usage()}
             b = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")

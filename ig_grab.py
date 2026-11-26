@@ -114,11 +114,20 @@ def transcribe(video: Path, dest: Path) -> str:
     return text
 
 
-def _claude(content, max_tokens: int) -> str:
+USAGE_FILE = Path("usage.jsonl")
+
+
+def _claude(content, max_tokens: int, label: str = "") -> str:
     import anthropic
     msg = anthropic.Anthropic().messages.create(
         model="claude-sonnet-5-5", max_tokens=max_tokens,
         messages=[{"role": "user", "content": content}])
+    try:  # co zuzywa API: kazde wywolanie zapisane z etykieta i liczba tokenow
+        with open(USAGE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"day": str(date.today()), "label": label, "in": msg.usage.input_tokens,
+                                "out": msg.usage.output_tokens}) + "\n")
+    except Exception:
+        pass
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
@@ -133,7 +142,7 @@ def slide_text(dest: Path) -> str:
         "To kolejne slajdy jednego posta. Przepisz doslownie caly tekst widoczny na kazdym "
         "slajdzie, jako '### Slajd N' + tekst. Nie dodawaj niczego od siebie. "
         "Slajd bez tekstu opisz jednym krotkim zdaniem w nawiasie."})
-    text = _claude(content, 4000)
+    text = _claude(content, 4000, "slajdy (obrazy)")
     (dest / "slides.txt").write_text(text, encoding="utf-8")
     return text
 
@@ -153,7 +162,7 @@ def frame_text(video: Path, dest: Path, transcript: str) -> str:
         "To klatki (1 na sekunde) z jednego krotkiego wideo. Przepisz doslownie caly tekst "
         "widoczny na ekranie, w kolejnosci klatek, bez powtorzen. Nic nie dodawaj. "
         "Gdy nie ma tekstu, napisz 'brak tekstu'."})
-    text = _claude(content, 3000)
+    text = _claude(content, 3000, "klatki wideo")
     (dest / "frames.txt").write_text(text, encoding="utf-8")
     return "" if text.lower().startswith("brak tekstu") else text
 
@@ -165,7 +174,7 @@ def recipe(source: str, dest: Path) -> str:
     text = _claude(
         "Z ponizszej tresci wyciagnij przepis jako Markdown: tytul, skladniki "
         "(z ilosciami), kroki. Nie dodawaj niczego, czego nie ma w zrodle; "
-        "brak danych oznacz jako 'brak'. Jesli to nie przepis, napisz 'to nie przepis'.\n\n" + source, 1500)
+        "brak danych oznacz jako 'brak'. Jesli to nie przepis, napisz 'to nie przepis'.\n\n" + source, 1500, "przepis")
     (dest / "recipe.md").write_text(text, encoding="utf-8")
     return text
 
@@ -209,7 +218,7 @@ def analyze_content(blocks: list, known: list = (), manual: bool = False, image:
     content = [*blocks, prompt] if image else [prompt, *blocks]
     d = None
     for _ in range(2):  # dlugi tekst bywa zle ucieczkowany w JSON - jedna ponowna proba
-        raw = _claude(content, 4000 if image else 1500)
+        raw = _claude(content, 4000 if image else 1500, "zrzut ekranu (obraz+analiza)" if image else "analiza notatki")
         m = re.search(r"\{.*\}", raw, re.S)
         try:
             d = json.loads(m.group(0)) if m else None
@@ -342,9 +351,9 @@ def process(url: str, out: Path, notes: Path, browser: str = "chrome", cookies: 
     slides = slide_text(dest) or frame_text(video, dest, text)
     source = f"OPIS:\n{caption}\n\nTRANSKRYPCJA:\n{text}\n\nTEKST ZE SLAJDOW / Z EKRANU:\n{slides}"
     sha = write_source(dest, source)
-    rec = recipe(source, dest)
-    write_note(notes, dest.name, url, info, analyze(source, known_tags(notes)), caption, text, slides, rec,
-               typ="instagram", sha=sha)
+    an = analyze(source, known_tags(notes))
+    rec = recipe(source, dest) if an.get("kategoria") == "przepis" else ""  # osobne wywolanie tylko dla przepisow
+    write_note(notes, dest.name, url, info, an, caption, text, slides, rec, typ="instagram", sha=sha)
     refresh_index(notes)
 
 
